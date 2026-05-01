@@ -1,8 +1,8 @@
 # Local README
 
-This file is for local-only notes about configs, modifications, and operational
-changes made in this working copy. It is excluded from git via
-`.git/info/exclude`.
+This file tracks setup notes, handoff instructions, and operational changes for
+the `mobile-command` branch. It is intentionally committed on this branch so the
+dedicated laptop agent can read it from a fresh clone.
 
 ## 2026-04-30 - Safe Pentest Setup
 
@@ -25,6 +25,16 @@ Added repo files for running Decepticon in a safer pentest posture:
 - `docs/safe-pentest-setup.md`
   - Step-by-step VirtualBox VM setup.
   - VPN, kill-switch, start, validation, containment, and teardown procedure.
+- `AGENTS.md`
+  - Root agent behavior for this branch.
+  - Requires MCP-first workflow when available.
+  - Defines safe setup scope, branch discipline, and prohibited behaviors.
+- `.vscode/extensions.json`
+  - VS Code extension recommendations limited to this repo's stack and setup path.
+  - Avoids unrelated extension/tool dependencies.
+- `docs/mobile-command-agent-tooling.md`
+  - Approved tool and extension list for the mobile command setup agent.
+  - Lists repo commands to use and tools/behaviors to avoid.
 
 Validation performed:
 
@@ -268,7 +278,8 @@ docker compose -f docker-compose.yml -f docker-compose.safe.yml down --volumes -
 
 Instruction for the next agent:
 
-- Read `docs/safe-pentest-setup.md` and this `LOCAL_README.md`.
+- Read `AGENTS.md`, `docs/mobile-command-agent-tooling.md`,
+  `docs/safe-pentest-setup.md`, and this `LOCAL_README.md`.
 - Finish setup on the dedicated laptop/VM only.
 - Do not start Decepticon on the main host.
 - Use API-first LLM configuration.
@@ -281,6 +292,13 @@ ask for a few environment-specific inputs before executing.
 
 Repo files already prepared:
 
+- `AGENTS.md`
+  - Root agent behavior for this branch.
+  - Requires MCP-first workflow when available.
+  - Defines safe setup scope, branch discipline, and prohibited behaviors.
+- `.vscode/extensions.json`
+  - VS Code extension recommendations limited to this repo's stack and setup path.
+  - Avoids unrelated extension/tool dependencies.
 - `docker-compose.safe.yml`
   - Compose override for safe VM operation.
   - Ensures exposed services bind to `127.0.0.1`.
@@ -294,10 +312,13 @@ Repo files already prepared:
   - Requires concrete VPN interface, endpoint IP, and endpoint port before use.
 - `docs/safe-pentest-setup.md`
   - Public/tracked setup guide.
+- `docs/mobile-command-agent-tooling.md`
+  - Approved tool and extension list for the mobile command setup agent.
+  - Lists repo commands to use and tools/behaviors to avoid.
 - `LOCAL_README.md`
-  - Local-only handoff notes.
-  - This file is ignored by git; copy it manually to the dedicated laptop if
-    the next agent starts from a fresh clone.
+  - Tracked branch handoff notes.
+  - This file is committed on `mobile-command` so the dedicated laptop agent can
+    read it from a fresh clone.
 
 What the next agent should ask for before setup:
 

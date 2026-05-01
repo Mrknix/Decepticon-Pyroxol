@@ -1,0 +1,22 @@
+{
+  "recommendations": [
+    "anthropic.claude-code",
+    "bradlc.vscode-tailwindcss",
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "github.vscode-github-actions",
+    "github.vscode-pull-request-github",
+    "hashicorp.terraform",
+    "ms-azuretools.vscode-containers",
+    "ms-azuretools.vscode-docker",
+    "ms-playwright.playwright",
+    "openai.chatgpt",
+    "yoavbls.pretty-ts-errors"
+  ],
+  "unwantedRecommendations": [
+    "amazonwebservices.aws-toolkit-vscode",
+    "github.copilot-chat",
+    "rooveterinaryinc.roo-cline",
+    "ms-dotnettools.vscode-dotnet-runtime"
+  ]
+}
