@@ -1,0 +1,56 @@
+#!/usr/sbin/nft -f
+#
+# Decepticon VM VPN kill switch template.
+#
+# Before loading, replace:
+#   VPN_IFACE   with the approved VPN interface, usually wg0
+#   VPN_SERVER  with the approved VPN endpoint IP
+#   VPN_PORT    with the approved VPN endpoint UDP or TCP port
+#
+# Example:
+#   sudo sed -e 's/VPN_IFACE/wg0/g' \
+#            -e 's/VPN_SERVER/203.0.113.10/g' \
+#            -e 's/VPN_PORT/51820/g' \
+#            scripts/decepticon-vpn-killswitch.nft | sudo nft -f -
+
+flush ruleset
+
+table inet decepticon_killswitch {
+  chain input {
+    type filter hook input priority 0; policy drop;
+
+    iifname "lo" accept
+    ct state established,related accept
+
+    # Allow SSH into the VM only from VirtualBox NAT port forwarding or local admin paths.
+    tcp dport 22 accept
+
+    # Allow VPN replies.
+    ip saddr VPN_SERVER accept
+    ip6 nexthdr ipv6-icmp accept
+    ip protocol icmp accept
+  }
+
+  chain output {
+    type filter hook output priority 0; policy drop;
+
+    oifname "lo" accept
+    ct state established,related accept
+
+    # Allow the VPN tunnel handshake before the VPN interface is up.
+    ip daddr VPN_SERVER udp dport VPN_PORT accept
+    ip daddr VPN_SERVER tcp dport VPN_PORT accept
+
+    # Once connected, all outbound traffic must use the approved VPN interface.
+    oifname "VPN_IFACE" accept
+  }
+
+  chain forward {
+    type filter hook forward priority 0; policy drop;
+
+    ct state established,related accept
+
+    # Docker container traffic may only leave through the approved VPN interface.
+    oifname "VPN_IFACE" accept
+  }
+}

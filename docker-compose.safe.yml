@@ -1,0 +1,43 @@
+# Safe pentest override.
+#
+# Usage:
+#   cp .env.safe.example .env
+#   docker compose -f docker-compose.yml -f docker-compose.safe.yml up -d --build \
+#     postgres neo4j litellm langgraph sandbox web
+#
+# This profile is intended to run inside a dedicated VM. It keeps service ports
+# bound to VM loopback and stores all engagement data under a VM-local path.
+
+services:
+  litellm:
+    ports: !override
+      - "127.0.0.1:${LITELLM_PORT:-4000}:4000"
+
+  postgres:
+    ports: !override
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+
+  neo4j:
+    ports: !override
+      - "127.0.0.1:${NEO4J_HTTP_PORT:-7474}:7474"
+      - "127.0.0.1:${NEO4J_BOLT_PORT:-7687}:7687"
+
+  sandbox:
+    volumes: !override
+      - ${DECEPTICON_ENGAGEMENT_WORKSPACE:-${DECEPTICON_HOME:-./.decepticon}/workspace}:/workspace
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 4g
+    cpus: 2.0
+    pids_limit: 1024
+
+  langgraph:
+    ports: !override
+      - "127.0.0.1:${LANGGRAPH_PORT:-2024}:2024"
+
+  web:
+    ports: !override
+      - "127.0.0.1:${WEB_PORT:-3000}:3000"
+      - "127.0.0.1:${TERMINAL_PORT:-3003}:3003"
+    volumes: !override
+      - ${DECEPTICON_HOME:-./.decepticon}/workspace:/workspace
