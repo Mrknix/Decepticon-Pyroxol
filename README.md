@@ -46,24 +46,36 @@
 ## Install
 
 **Prerequisites**: [Docker](https://docs.docker.com/get-docker/) and Docker Compose v2.
+Supported on macOS (Apple Silicon + Intel), Linux (amd64 + arm64), and Windows (amd64 + arm64) — native via PowerShell or via WSL2 (Ubuntu / Kali).
 
+**macOS / Linux / WSL2**
 ```bash
 curl -fsSL https://decepticon.red/install | bash
 decepticon onboard   # Interactive setup wizard (provider, API key, model profile)
-decepticon           # Start everything: terminal CLI + web dashboard at http://localhost:3000
+decepticon           # Start the core stack and drop into the terminal CLI
 ```
 
-→ **[Full setup guide](docs/getting-started.md)**
+The default start brings up the core management plane (LiteLLM, PostgreSQL, Neo4j, Skillogy, LangGraph, sandbox) and launches the terminal CLI. Specialist workloads (BloodHound CE, Sliver C2, Ghidra MCP, …) and the web dashboard come up on demand — the orchestrator spawns specialists via `ops_start("ad")` etc., and you bring up the dashboard from inside the CLI with `/web` (see [Web Dashboard](docs/web-dashboard.md)).
 
----
+**Windows (PowerShell, native)**
+```powershell
+irm https://decepticon.red/install.ps1 | iex
+decepticon onboard
+decepticon
+```
 
-## Try the Demo
+→ **[Quick start](docs/getting-started.md)** · **[Full setup walkthrough](docs/setup-guide.md)**
+
+### Use as a library (pip)
+
+Building on top of the agents — a SaaS, a research integration, or a custom orchestrator? Install the SDK from PyPI:
 
 ```bash
-decepticon demo
+pip install decepticon              # core SDK
+pip install "decepticon[neo4j]"     # + the knowledge-graph attack-chain tools
 ```
 
-Launches Metasploitable 2, loads a pre-built engagement, and runs the full kill chain autonomously: port scan → vsftpd exploit → Sliver C2 implant → credential harvesting → internal recon.
+`decepticon` is a **client SDK**: it ships the agent factories, middleware, tools, and skills, and routes LLM calls and sandbox execution to runtime services over HTTP (`DECEPTICON_LLM__PROXY_URL`, `SAAS_SANDBOX_URL`). Running agents still needs those services — use the Docker stack above, or point the URLs at your own equivalents. See **[Decepticon as a library](docs/library-usage.md)** for the factory override surface, declarative `PluginBundle` plugins, and the safety gate.
 
 ---
 
@@ -71,7 +83,25 @@ Launches Metasploitable 2, loads a pre-built engagement, and runs the full kill 
 
 [![Sponsor](https://img.shields.io/badge/Sponsor-Decepticon-red?style=for-the-badge&logo=github)](https://github.com/sponsors/PurpleCHOIms)
 
-We're building Decepticon as an **Offensive Vaccine** for the AI-driven threat landscape. If you believe in autonomous red teaming as a path to stronger defense, consider supporting the project.
+We're building Decepticon toward an **Offensive Vaccine** for the AI-driven threat landscape. If you believe in autonomous red teaming as a path to stronger defense, consider supporting the project.
+
+---
+
+## Benchmark
+
+<div align="center">
+  <img src="assets/benchmark/decepticon_donut.png" alt="Decepticon — XBOW pass rate 102/104 (98.08%)" width="560">
+</div>
+
+| Benchmark | Difficulty | Pass Rate |
+|-----------|------------|-----------|
+| [XBOW validation-benchmarks](https://github.com/PurpleAILAB/xbow-validation-benchmarks) | Easy (Level 1)   | **45 / 45** (100 %) |
+| [XBOW validation-benchmarks](https://github.com/PurpleAILAB/xbow-validation-benchmarks) | Medium (Level 2) | **50 / 51** (98.0 %) |
+| [XBOW validation-benchmarks](https://github.com/PurpleAILAB/xbow-validation-benchmarks) | Hard (Level 3)   | **7 / 8** (87.5 %) |
+| [XBOW validation-benchmarks](https://github.com/PurpleAILAB/xbow-validation-benchmarks) | **All levels**   | **102 / 104** (98.08 %) |
+
+- **[Full per-challenge index, attack-class matrix, and LangSmith traces](benchmark/results/README.md)**
+- **[Comparison vs other AI pentest agents (Strix, PentestGPT, MAPTA, Cyber-AutoAgent, XBOW commercial, …)](docs/benchmark-comparison.md)**
 
 ---
 
@@ -81,91 +111,60 @@ The "AI + hacking" space is full of demos that run nmap and print a report. That
 
 **Decepticon is a professional autonomous Red Team agent.** It executes realistic attack chains — reconnaissance, exploitation, privilege escalation, lateral movement, C2 — the way a real adversary would, not the way a scanner does.
 
-But more importantly: it operates under the discipline that separates red teamers from script kiddies.
+But more importantly: it operates under the discipline that separates red teamers from script kiddies. Before a single packet leaves the wire, Decepticon generates a complete engagement package — **RoE**, **ConOps**, **Deconfliction Plan**, and **OPPLAN** with MITRE ATT&CK mapping — and every action runs inside those defined rules.
 
-Before a single packet leaves the wire, Decepticon generates a complete engagement package:
-
-- **RoE** (Rules of Engagement) — Authorized scope, exclusions, testing window, escalation contacts
-- **ConOps** (Concept of Operations) — Threat actor profile, methodology, TTPs
-- **Deconfliction Plan** — Source IPs, time windows, shared codes for real-time SOC deconfliction
-- **OPPLAN** (Operations Plan) — Full mission plan with objectives, kill chain phases, and MITRE ATT&CK mapping
-
-Every action operates inside defined rules. The agent doesn't just hack — it runs a professional Red Team operation that happens to be autonomous.
+→ **[Engagement workflow deep dive](docs/engagement-workflow.md)**
 
 ---
 
 ## Why Decepticon?
 
-**Real kill chains, not checkbox scans.**
-Decepticon reads an OPPLAN and pursues objectives through whatever path opens up — pivoting, adapting, chaining techniques — the way a real attacker would.
+**Real kill chains, not checkbox scans.** Decepticon reads an OPPLAN and pursues objectives through whatever path opens up — pivoting, adapting, chaining techniques.
 
-**Interactive shells, actually.**
-Real offensive tools are interactive — `msfconsole`, `sliver-client`, `evil-winrm`. Most AI agents fire one-shot commands and give up. Decepticon runs every command inside persistent tmux sessions with automatic prompt detection. When a tool drops you into an interactive prompt, the agent sends follow-up commands. No workarounds.
+**Interactive shells, actually.** Real offensive tools are interactive (`msfconsole`, `sliver-client`, `evil-winrm`). Decepticon runs every command inside persistent tmux sessions with automatic prompt detection — so when a tool drops into an interactive prompt, the agent sends follow-up commands without workarounds.
 
-**Real infrastructure isolation.**
-All commands run inside a hardened Kali Linux sandbox on a dedicated operational network (`sandbox-net`), fully isolated from management (`decepticon-net`). LLM gateway, databases, and agent API live on one network; sandbox, C2 server, and targets live on another. Zero cross-network access. The agent controls the sandbox via Docker socket only.
+**Hardened sandbox isolation.** All commands run inside a Kali Linux sandbox on a dedicated operational network (`sandbox-net`), separate from the management plane (`decepticon-net`). LangGraph drives the sandbox via the Docker socket. → **[Architecture](docs/architecture.md)**
 
-**Offense serves defense.**
-The [Offensive Vaccine](docs/offensive-vaccine.md) loop turns every finding into a defense improvement — automatically. Attack → defend → verify, at machine speed. This is Step 1 toward infrastructure that hardens itself.
+**Offense serves defense.** The planned [Offensive Vaccine](docs/offensive-vaccine.md) loop will turn findings into defense improvements through an attack → defend → verify cycle.
 
 ---
 
 ## Architecture
 
-Two isolated networks. Management and operations share zero network access.
-
 <div align="center">
   <img src="assets/decepticon_infra.svg" alt="Decepticon Infrastructure" width="680">
 </div>
 
-→ **[Architecture deep dive](docs/architecture.md)**
+Two-network design. The **always-on** management plane (LiteLLM, PostgreSQL, Skillogy, LangGraph) and the always-on sandbox plane stay up across the whole engagement; everything else is **dynamic-spawn** — the Web dashboard comes up on `/web` from the CLI, and specialist workloads (BloodHound CE, Sliver C2, Ghidra MCP, …) come up only when the orchestrator calls `ops_start(...)` (see [ADR-0006](docs/adr/0006-agent-driven-container-lifecycle.md)). Networks: management on `decepticon-net`; sandbox + C2 server + targets on `sandbox-net`. Neo4j is dual-homed so the agent (on management) can persist findings written from inside the sandbox.
+
+→ **[Architecture deep dive](docs/architecture.md)** · **[Knowledge graph](docs/knowledge-graph.md)**
 
 ---
 
 ## Agents
 
-16 specialist agents organized by kill chain phase. Each agent starts with a fresh context window per objective — no accumulated noise.
+16 specialist agents organized by kill chain phase, with a fresh context window per objective — no accumulated noise.
 
-| Phase | Agents |
-|-------|--------|
-| **Orchestration** | Decepticon (main), Soundwave (planning + docs) |
-| **Reconnaissance** | Recon, Scanner |
-| **Exploitation** | Exploit, Exploiter, Detector, Verifier, Patcher |
-| **Post-Exploitation** | Post-Exploit |
-| **Defense** | Defender (Offensive Vaccine loop) |
-| **Specialists** | AD Operator, Cloud Hunter, Contract Auditor, Reverser, Analyst |
+Orchestration · Reconnaissance · Exploitation · Post-Exploitation · Vulnerability Research · Domain Specialists (AD, Cloud, Smart Contracts, Reversing, Analyst).
 
-The vulnerability research pipeline (Scanner → Detector → Verifier → Exploiter → Patcher) handles the full lifecycle from discovery through proof-of-concept to patch proposal.
-
-→ **[Agent details and middleware stack](docs/agents.md)**
+→ **[Full agent roster and middleware stack](docs/agents.md)**
 
 ---
 
-## Models
+## Models & Providers
 
-Tier-based, credentials-aware fallback chain. You tell Decepticon which credentials you have — Anthropic API, Claude Code OAuth, OpenAI API, Google API, MiniMax API — in priority order; it builds the primary→fallback chain at every tier from there.
-
-The active **profile** decides each agent's tier:
+Tier-based, credentials-aware fallback chain. You declare which credentials you have in priority order; Decepticon builds the primary→fallback chain at every tier from there.
 
 | Profile | Tier per agent | Use case |
 |---------|----------------|----------|
-| **eco** (default) | per-agent (HIGH for orchestrator/exploiter/patcher/analyst, MID for execution, LOW for recon/scanner/soundwave) | Production |
-| **max** | every agent on HIGH | High-value targets |
-| **test** | every agent on LOW | Development / CI |
+| **eco** (default) | Per-agent (HIGH for orchestrator/exploiter/patcher/analyst, MID for execution, LOW for recon/soundwave) | Production |
+| **max** | Every agent on HIGH | High-value targets |
+| **test** | Every agent on LOW | Development / CI |
 
-**Tier × method matrix**:
+**Tier-mapped providers**: Anthropic, OpenAI, Google Gemini, MiniMax, DeepSeek, xAI, Mistral, OpenRouter, Nvidia NIM, Ollama (local).
+**Subscription OAuth**: Claude Max/Pro/Team, ChatGPT Pro/Plus/Team, Gemini Advanced, Copilot Pro, SuperGrok, Perplexity Pro.
 
-|                   | HIGH                    | MID                      | LOW                                |
-|-------------------|--------------------------|---------------------------|-------------------------------------|
-| `anthropic_api`   | claude-opus-4-7          | claude-sonnet-4-6         | claude-haiku-4-5                    |
-| `anthropic_oauth` | auth/claude-opus-4-7     | auth/claude-sonnet-4-6    | auth/claude-haiku-4-5               |
-| `openai_api`      | gpt-5.5                  | gpt-5.4                   | gpt-5-nano                        |
-| `google_api`      | gemini-2.5-pro           | gemini-2.5-flash          | gemini-2.5-flash-lite               |
-| `minimax_api`     | MiniMax-M2.5             | MiniMax-M2.5-lightning              | — *(falls through to next method)*  |
-
-Configure with `decepticon onboard`; set the profile via `DECEPTICON_MODEL_PROFILE=eco` in `.env`. Provider outage or rate limit → seamless fallback to the next method in your priority list.
-
-→ **[Full model reference](docs/models.md)**
+Configure via `decepticon onboard`. → **[Full model reference & fallback examples](docs/models.md)**
 
 ---
 
@@ -174,6 +173,7 @@ Configure with `decepticon onboard`; set the profile via `DECEPTICON_MODEL_PROFI
 | Topic | Doc |
 |-------|-----|
 | Installation and first engagement | [Getting Started](docs/getting-started.md) |
+| Complete setup, OAuth, providers, dashboard | [Setup Guide](docs/setup-guide.md) |
 | All CLI commands and keyboard shortcuts | [CLI Reference](docs/cli-reference.md) |
 | All `make` targets | [Makefile Reference](docs/makefile-reference.md) |
 | Agent roster and middleware | [Agents](docs/agents.md) |
@@ -193,8 +193,8 @@ Configure with `decepticon onboard`; set the profile via `DECEPTICON_MODEL_PROFI
 ```bash
 git clone https://github.com/PurpleAILAB/Decepticon.git
 cd Decepticon
-make dev     # Start with hot-reload
-make cli     # Open the interactive CLI (separate terminal)
+make dogfood  # Full OSS UX (launcher → onboard → CLI) on local code
+make dev      # Backend hot-reload (compose watch) — daily dev loop
 ```
 
 → **[Contributing guide](docs/contributing.md)**
@@ -203,7 +203,7 @@ make cli     # Open the interactive CLI (separate terminal)
 
 ## Community
 
-Join the [Discord](https://discord.gg/TZUYsZgrRG) — ask questions, share engagement logs, discuss techniques, or just connect with others building at the intersection of offense and defense.
+Join the [Discord](https://discord.gg/TZUYsZgrRG) — ask questions, share engagement logs, discuss techniques.
 
 ---
 

@@ -3,15 +3,17 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
 func TestParseEnvLine(t *testing.T) {
 	tests := []struct {
-		line      string
-		wantKey   string
-		wantVal   string
-		wantOk    bool
+		line    string
+		wantKey string
+		wantVal string
+		wantOk  bool
 	}{
 		{"KEY=value", "KEY", "value", true},
 		{"KEY=\"quoted value\"", "KEY", "quoted value", true},
@@ -107,6 +109,8 @@ func TestValidateAPIKeys_RejectsBadFormat(t *testing.T) {
 		{"missing prefix", map[string]string{"ANTHROPIC_API_KEY": "no-prefix-key-of-decent-length"}},
 		{"too short", map[string]string{"OPENAI_API_KEY": "sk-short"}},
 		{"google missing prefix", map[string]string{"GEMINI_API_KEY": "sk-wrongprefix-key-long-enough-here"}},
+		{"openrouter missing prefix", map[string]string{"OPENROUTER_API_KEY": "sk-wrongprefix-key-long-enough-here"}},
+		{"nvidia missing prefix", map[string]string{"NVIDIA_API_KEY": "sk-wrongprefix-key-long-enough-here"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -117,9 +121,151 @@ func TestValidateAPIKeys_RejectsBadFormat(t *testing.T) {
 	}
 }
 
+// TestValidateAPIKeys_AcceptsAllProviders covers issue #105: keys for
+// providers added past the original four (Anthropic/OpenAI/Gemini/MiniMax)
+// were silently dropped because APIKeyNames + keyFormatRules only knew
+// about the original four. Each provider must now satisfy the gate on
+// its own.
+func TestValidateAPIKeys_AcceptsAllProviders(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+	}{
+		{"openrouter", map[string]string{"OPENROUTER_API_KEY": "sk-or-realkeythatislongenough"}},
+		{"nvidia", map[string]string{"NVIDIA_API_KEY": "nvapi-realkeythatislongenough"}},
+		{"deepseek", map[string]string{"DEEPSEEK_API_KEY": "sk-realkeythatislongenough"}},
+		{"xai", map[string]string{"XAI_API_KEY": "xai-realkeythatislongenough"}},
+		{"mistral_no_prefix", map[string]string{"MISTRAL_API_KEY": "any-shape-key-of-sufficient-length"}},
+		{"minimax_no_prefix", map[string]string{"MINIMAX_API_KEY": "eyJ-shaped-or-not-just-long-enough"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := ValidateAPIKeys(tt.env); err != nil {
+				t.Errorf("expected %s to pass validation, got: %v", tt.name, err)
+			}
+		})
+	}
+}
+
+// TestValidateAuth_OAuthSubscriptions verifies each custom subscription handler
+// accepts any of its supported credential surfaces — env token or tokens.json.
+func TestValidateAuth_OAuthSubscriptions(t *testing.T) {
+	cases := []struct {
+		toggle    string
+		envName   string
+		configDir string
+		fileFmt   string
+	}{
+		{"DECEPTICON_AUTH_GEMINI", "GEMINI_SESSION_COOKIES", "gemini", "tokens.json"},
+		{"DECEPTICON_AUTH_COPILOT", "COPILOT_REFRESH_TOKEN", "copilot", "tokens.json"},
+		{"DECEPTICON_AUTH_GROK", "GROK_SESSION_TOKEN", "grok", "tokens.json"},
+		{"DECEPTICON_AUTH_PERPLEXITY", "PERPLEXITY_SESSION_TOKEN", "perplexity", "tokens.json"},
+	}
+	for _, c := range cases {
+		t.Run(c.envName+" via env", func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home) // Windows: os.UserHomeDir reads USERPROFILE
+			env := map[string]string{c.toggle: "true", c.envName: "anything-not-empty"}
+			if err := ValidateAuth(env); err != nil {
+				t.Errorf("expected env-token to satisfy %s: %v", c.toggle, err)
+			}
+		})
+		t.Run(c.envName+" via tokens.json", func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home) // Windows: os.UserHomeDir reads USERPROFILE
+			dir := filepath.Join(home, ".config", c.configDir)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, c.fileFmt), []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			env := map[string]string{c.toggle: "true"}
+			if err := ValidateAuth(env); err != nil {
+				t.Errorf("expected tokens.json to satisfy %s: %v", c.toggle, err)
+			}
+		})
+		t.Run(c.envName+" toggle on but no creds fails", func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home) // Windows: os.UserHomeDir reads USERPROFILE
+			env := map[string]string{c.toggle: "true"}
+			err := ValidateAuth(env)
+			if err == nil {
+				t.Errorf("expected %s with no creds to fail", c.toggle)
+			}
+		})
+	}
+}
+
+func TestValidateAuth_ChatGPTNativeOAuth(t *testing.T) {
+	t.Run("toggle on allows native device login without session cookie", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("USERPROFILE", home) // Windows: os.UserHomeDir reads USERPROFILE
+		env := map[string]string{"DECEPTICON_AUTH_CHATGPT": "true"}
+		if err := ValidateAuth(env); err != nil {
+			t.Errorf("expected native ChatGPT OAuth to pass without launcher-side token input: %v", err)
+		}
+	})
+
+	t.Run("uses codex auth.json path", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("USERPROFILE", home) // Windows: os.UserHomeDir reads USERPROFILE
+		got := subscriptionTokenPaths(map[string]string{}, home, oauthSubscriptions["chatgpt"])
+		want := []string{filepath.Join(home, ".codex", "auth.json")}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("unexpected ChatGPT token paths: got %v want %v", got, want)
+		}
+	})
+}
+
+// TestValidateAuth_OllamaLocal covers issue #106: the user picks
+// ollama_local and sets OLLAMA_API_BASE, no API key needed. The
+// previous gate rejected this because it only checked API-key columns.
+func TestValidateAuth_OllamaLocal(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // Windows: os.UserHomeDir reads USERPROFILE
+
+	t.Run("priority+base passes", func(t *testing.T) {
+		env := map[string]string{
+			"DECEPTICON_AUTH_PRIORITY": "ollama_local",
+			"OLLAMA_API_BASE":          "http://host.docker.internal:11434",
+		}
+		if err := ValidateAuth(env); err != nil {
+			t.Errorf("expected ollama_local to pass without API key: %v", err)
+		}
+	})
+
+	t.Run("priority alone without base fails with helpful message", func(t *testing.T) {
+		env := map[string]string{"DECEPTICON_AUTH_PRIORITY": "ollama_local"}
+		err := ValidateAuth(env)
+		if err == nil {
+			t.Fatal("expected error when ollama_local is selected but base url is missing")
+		}
+		if !strings.Contains(err.Error(), "OLLAMA_API_BASE") {
+			t.Errorf("expected error mentioning OLLAMA_API_BASE, got: %v", err)
+		}
+	})
+
+	t.Run("base url alone (no priority entry) is enough", func(t *testing.T) {
+		// User edits .env directly with just OLLAMA_API_BASE — accept it
+		// as an opt-in signal.
+		env := map[string]string{"OLLAMA_API_BASE": "http://localhost:11434"}
+		if err := ValidateAuth(env); err != nil {
+			t.Errorf("expected bare OLLAMA_API_BASE to satisfy auth: %v", err)
+		}
+	})
+}
+
 func TestValidateAuth_OAuth(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // Windows: os.UserHomeDir reads USERPROFILE
 	// OAuth requested, no API keys configured.
 	env := map[string]string{"DECEPTICON_AUTH_CLAUDE_CODE": "true"}
 
@@ -183,6 +329,7 @@ func TestValidateAuth_OAuthFallsBackToAPIKey(t *testing.T) {
 	// "at least one method works" rule.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // Windows: os.UserHomeDir reads USERPROFILE
 	env := map[string]string{
 		"DECEPTICON_AUTH_CLAUDE_CODE": "true",
 		"ANTHROPIC_API_KEY":           "sk-ant-api03-realkeythatislongenough",
@@ -195,6 +342,7 @@ func TestValidateAuth_OAuthFallsBackToAPIKey(t *testing.T) {
 func TestValidateAuth_NeitherConfigured(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // Windows: os.UserHomeDir reads USERPROFILE
 	// No OAuth, no real API keys.
 	env := map[string]string{
 		"ANTHROPIC_API_KEY": "your-anthropic-key-here",
@@ -219,7 +367,7 @@ DECEPTICON_MODEL_PROFILE=eco
 	}
 
 	values := map[string]string{
-		"ANTHROPIC_API_KEY":       "sk-real-key",
+		"ANTHROPIC_API_KEY":        "sk-real-key",
 		"DECEPTICON_MODEL_PROFILE": "max",
 	}
 
@@ -265,5 +413,151 @@ func TestGet(t *testing.T) {
 	}
 	if Get(env, "MISSING", "default") != "default" {
 		t.Error("expected default")
+	}
+}
+
+func TestMigrateActiveComposeProfiles_RewritesActiveLine(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+	content := `# Header
+ANTHROPIC_API_KEY=sk-ant-key
+
+# Default C2 server profile.
+COMPOSE_PROFILES=c2-sliver
+
+# Trailing comment
+`
+	if err := os.WriteFile(envFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rewrote, err := MigrateActiveComposeProfiles(envFile)
+	if err != nil {
+		t.Fatalf("MigrateActiveComposeProfiles error: %v", err)
+	}
+	if !rewrote {
+		t.Fatalf("expected rewrote=true")
+	}
+
+	out, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(out), "\nCOMPOSE_PROFILES=c2-sliver\n") {
+		t.Errorf("active COMPOSE_PROFILES line survived migration:\n%s", out)
+	}
+	if !strings.Contains(string(out), "[v1.1.8 ADR-0006 migration]") {
+		t.Errorf("expected migration comment, got:\n%s", out)
+	}
+	// Original value preserved inline for restorability.
+	if !strings.Contains(string(out), "was: COMPOSE_PROFILES=c2-sliver") {
+		t.Errorf("expected 'was: COMPOSE_PROFILES=c2-sliver' marker in:\n%s", out)
+	}
+	// Unrelated lines untouched.
+	if !strings.Contains(string(out), "ANTHROPIC_API_KEY=sk-ant-key") {
+		t.Errorf("unrelated lines lost; got:\n%s", out)
+	}
+
+	// Backup written with the original (pre-migration) content.
+	bak, err := os.ReadFile(envFile + ".bak")
+	if err != nil {
+		t.Fatalf("backup not written: %v", err)
+	}
+	if string(bak) != content {
+		t.Errorf("backup mismatch:\n got:%s\nwant:%s", bak, content)
+	}
+}
+
+func TestMigrateActiveComposeProfiles_LeavesCommentedLineAlone(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+	content := `# COMPOSE_PROFILES=c2-sliver
+ANTHROPIC_API_KEY=sk-ant-key
+`
+	if err := os.WriteFile(envFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rewrote, err := MigrateActiveComposeProfiles(envFile)
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if rewrote {
+		t.Errorf("expected rewrote=false on already-commented file")
+	}
+	// File unchanged.
+	out, _ := os.ReadFile(envFile)
+	if string(out) != content {
+		t.Errorf("file modified despite no active line:\n got:%s\nwant:%s", out, content)
+	}
+	// No backup written.
+	if _, err := os.Stat(envFile + ".bak"); !os.IsNotExist(err) {
+		t.Errorf("backup created on no-op migration")
+	}
+}
+
+func TestMigrateActiveComposeProfiles_Idempotent(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+	content := `COMPOSE_PROFILES=c2-sliver,ad
+ANTHROPIC_API_KEY=sk-ant-key
+`
+	if err := os.WriteFile(envFile, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if rewrote, err := MigrateActiveComposeProfiles(envFile); err != nil || !rewrote {
+		t.Fatalf("first migration: rewrote=%v err=%v; want (true, nil)", rewrote, err)
+	}
+	first, _ := os.ReadFile(envFile)
+
+	if rewrote, err := MigrateActiveComposeProfiles(envFile); err != nil || rewrote {
+		t.Fatalf("second migration: rewrote=%v err=%v; want (false, nil)", rewrote, err)
+	}
+	second, _ := os.ReadFile(envFile)
+	if string(first) != string(second) {
+		t.Errorf("file changed across idempotent migrations:\n first:%s\nsecond:%s", first, second)
+	}
+}
+
+func TestMigrateActiveComposeProfiles_NoEnvFile(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+
+	rewrote, err := MigrateActiveComposeProfiles(envFile)
+	if err != nil {
+		t.Fatalf("missing .env should not error: %v", err)
+	}
+	if rewrote {
+		t.Errorf("rewrote=true on missing file")
+	}
+}
+
+func TestMigrateActiveComposeProfiles_BackupNotOverwritten(t *testing.T) {
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, ".env")
+	backupPath := envFile + ".bak"
+
+	original := "COMPOSE_PROFILES=c2-sliver\n"
+	if err := os.WriteFile(envFile, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// First migration creates the backup.
+	if _, err := MigrateActiveComposeProfiles(envFile); err != nil {
+		t.Fatal(err)
+	}
+	firstBackup, _ := os.ReadFile(backupPath)
+
+	// Operator re-enables the active line and runs migration again.
+	if err := os.WriteFile(envFile, []byte("COMPOSE_PROFILES=ad\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MigrateActiveComposeProfiles(envFile); err != nil {
+		t.Fatal(err)
+	}
+	secondBackup, _ := os.ReadFile(backupPath)
+	// Backup must still match the very first pre-migration snapshot.
+	if string(firstBackup) != string(secondBackup) {
+		t.Errorf("backup was overwritten on second migration:\n first:%s\nsecond:%s", firstBackup, secondBackup)
 	}
 }

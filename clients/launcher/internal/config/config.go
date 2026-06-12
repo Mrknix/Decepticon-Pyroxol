@@ -138,11 +138,38 @@ func writeEnvFromString(tmpl string, outputPath string, values map[string]string
 }
 
 // APIKeyNames lists the API key environment variable names to check.
+// Order matters: a valid key in this list satisfies the "at least one
+// credential" startup gate. Keep in sync with keyFormatRules below and
+// with decepticon/llm/factory.py::_API_METHOD_ENV.
 var APIKeyNames = []string{
 	"ANTHROPIC_API_KEY",
 	"OPENAI_API_KEY",
 	"GEMINI_API_KEY",
 	"MINIMAX_API_KEY",
+	"OPENROUTER_API_KEY",
+	"NVIDIA_API_KEY",
+	"DEEPSEEK_API_KEY",
+	"XAI_API_KEY",
+	"MISTRAL_API_KEY",
+	// Cloud gateways added in the OpenClaude provider migration.
+	"GROQ_API_KEY",
+	"TOGETHER_API_KEY",
+	"FIREWORKS_API_KEY",
+	"COHERE_API_KEY",
+	"MOONSHOT_API_KEY",
+	"ZAI_API_KEY",
+	"DASHSCOPE_API_KEY",
+	"GITHUB_TOKEN",
+	// AWS Bedrock — IAM access key. Validation accepts the AKIA prefix.
+	"AWS_ACCESS_KEY_ID",
+	// Azure OpenAI deployment key.
+	"AZURE_API_KEY",
+	// Vertex AI uses a service-account JSON path. Treated as the
+	// credential signal so an empty path doesn't pass startup gating.
+	"GOOGLE_APPLICATION_CREDENTIALS",
+	// Custom OpenAI-compatible endpoint key — paired with a base URL,
+	// no fixed shape.
+	"CUSTOM_OPENAI_API_KEY",
 }
 
 // IsPlaceholder checks if a value looks like a placeholder.
@@ -154,22 +181,57 @@ func IsPlaceholder(val string) bool {
 // Format checks are intentionally lenient — providers occasionally evolve key shapes
 // (OpenAI shipped sk-proj-* in 2024, Anthropic sk-ant-api03-* etc.). The check only
 // rejects values that are obviously malformed (typos, missing prefix).
+//
+// An empty Prefix means "no fixed shape, skip the prefix check" (only the
+// length floor still applies). MiniMax/Mistral keys ship without a
+// universal prefix and would otherwise be rejected when the user pastes
+// the right key.
 var keyFormatRules = map[string]struct {
 	Prefix string
 	Hint   string
 }{
-	"ANTHROPIC_API_KEY": {Prefix: "sk-", Hint: "Anthropic keys start with 'sk-'"},
-	"OPENAI_API_KEY":    {Prefix: "sk-", Hint: "OpenAI keys start with 'sk-'"},
-	"GEMINI_API_KEY":    {Prefix: "AIza", Hint: "Gemini keys start with 'AIza'"},
+	"ANTHROPIC_API_KEY":              {Prefix: "sk-", Hint: "Anthropic keys start with 'sk-'"},
+	"OPENAI_API_KEY":                 {Prefix: "sk-", Hint: "OpenAI keys start with 'sk-'"},
+	"GEMINI_API_KEY":                 {Prefix: "AIza", Hint: "Gemini keys start with 'AIza'"},
+	"OPENROUTER_API_KEY":             {Prefix: "sk-or-", Hint: "OpenRouter keys start with 'sk-or-'"},
+	"NVIDIA_API_KEY":                 {Prefix: "nvapi-", Hint: "NVIDIA keys start with 'nvapi-'"},
+	"DEEPSEEK_API_KEY":               {Prefix: "sk-", Hint: "DeepSeek keys start with 'sk-'"},
+	"XAI_API_KEY":                    {Prefix: "xai-", Hint: "xAI keys start with 'xai-'"},
+	"MINIMAX_API_KEY":                {Prefix: "", Hint: ""},
+	"MISTRAL_API_KEY":                {Prefix: "", Hint: ""},
+	"GROQ_API_KEY":                   {Prefix: "gsk_", Hint: "Groq keys start with 'gsk_'"},
+	"TOGETHER_API_KEY":               {Prefix: "", Hint: ""},
+	"FIREWORKS_API_KEY":              {Prefix: "fw_", Hint: "Fireworks keys start with 'fw_'"},
+	"COHERE_API_KEY":                 {Prefix: "", Hint: ""},
+	"MOONSHOT_API_KEY":               {Prefix: "sk-", Hint: "Moonshot keys start with 'sk-'"},
+	"ZAI_API_KEY":                    {Prefix: "", Hint: ""},
+	"DASHSCOPE_API_KEY":              {Prefix: "sk-", Hint: "DashScope keys start with 'sk-'"},
+	// GitHub fine-grained PATs start with github_pat_; classic PATs
+	// start with ghp_. Accept either by skipping the prefix check.
+	"GITHUB_TOKEN":                   {Prefix: "", Hint: ""},
+	"AWS_ACCESS_KEY_ID":              {Prefix: "AKIA", Hint: "AWS access key IDs start with 'AKIA'"},
+	"AZURE_API_KEY":                  {Prefix: "", Hint: ""},
+	"GOOGLE_APPLICATION_CREDENTIALS": {Prefix: "", Hint: "must be an absolute path to a service-account JSON file"},
+
+	"CUSTOM_OPENAI_API_KEY":          {Prefix: "", Hint: ""},
 }
 
 // validateKeyFormat returns an empty string if the key looks valid, or a reason if not.
 func validateKeyFormat(name, val string) string {
+	// File-path keys have different validation
+	if name == "GOOGLE_APPLICATION_CREDENTIALS" {
+		if _, err := os.Stat(val); err != nil {
+			return "file not found: " + val
+		}
+		return ""
+	}
 	if len(val) < 20 {
 		return "value is too short to be a valid API key"
 	}
 	if rule, ok := keyFormatRules[name]; ok {
-		if !strings.HasPrefix(val, rule.Prefix) {
+		// Empty Prefix → provider has no fixed prefix, length floor is the
+		// only signal. Skip the prefix check rather than rejecting valid keys.
+		if rule.Prefix != "" && !strings.HasPrefix(val, rule.Prefix) {
 			return rule.Hint
 		}
 	}
@@ -210,36 +272,170 @@ func ValidateAPIKeys(env map[string]string) error {
 	return fmt.Errorf("%s", msg.String())
 }
 
+// subscriptionMethod groups the env signal + credential layout for one
+// OAuth subscription handler so we don't repeat the validation logic.
+// Resolution order matches each runtime provider exactly:
+//
+//  1. <PROVIDER>_ACCESS_TOKEN   — pre-extracted Bearer
+//  2. <PROVIDER>_SESSION_TOKEN  — browser session cookie value
+//  3. configured token file on disk
+//
+// Two providers diverge slightly:
+//   - Gemini Advanced ships a multi-cookie value (GEMINI_SESSION_COOKIES)
+//     instead of a single session token. accept either env name.
+//   - Copilot Pro uses a refresh-token rotation (COPILOT_REFRESH_TOKEN)
+//     instead of a session cookie. Same fall-through, different env name.
+//   - ChatGPT uses Decepticon's auth/ handler reading the Codex CLI
+//     credential store at ~/.codex/auth.json. The launcher mounts that
+//     file into the container so a host-side `codex login` is visible
+//     to the running proxy without rebuilding.
+//
+// AbsolutePath is set for handlers that store a single credential file
+// at a fixed absolute path (rather than under ~/.config/<dir>/<file>).
+// When set, ConfigDir / TokenFile are ignored.
+type subscriptionMethod struct {
+	Toggle                string   // DECEPTICON_AUTH_<X> boolean enabling this path
+	TokenEnvs             []string // env vars that satisfy the path on their own
+	ConfigDir             string   // ~/.config/<dir>/<token file> fallback
+	TokenFile             string   // token file name; defaults to tokens.json
+	DirEnv                string   // optional host-side token directory env var
+	AbsolutePath          string   // optional fixed-relative-to-$HOME path (e.g. .codex/auth.json)
+	LegacyDir             string   // optional legacy ~/.config/<dir>/<token file> fallback
+	Label                 string   // human name for error messages
+	AllowInteractiveLogin bool     // provider can bootstrap credentials at runtime
+}
+
+var oauthSubscriptions = map[string]subscriptionMethod{
+	"chatgpt": {
+		Toggle:                "DECEPTICON_AUTH_CHATGPT",
+		AbsolutePath:          ".codex/auth.json",
+		Label:                 "ChatGPT",
+		AllowInteractiveLogin: true,
+	},
+	"gemini": {
+		Toggle:    "DECEPTICON_AUTH_GEMINI",
+		TokenEnvs: []string{"GEMINI_ACCESS_TOKEN", "GEMINI_SESSION_COOKIES"},
+		ConfigDir: "gemini",
+		Label:     "Gemini Advanced",
+	},
+	"copilot": {
+		Toggle:    "DECEPTICON_AUTH_COPILOT",
+		TokenEnvs: []string{"COPILOT_ACCESS_TOKEN", "COPILOT_REFRESH_TOKEN"},
+		ConfigDir: "copilot",
+		Label:     "Copilot Pro",
+	},
+	"grok": {
+		Toggle:    "DECEPTICON_AUTH_GROK",
+		TokenEnvs: []string{"GROK_ACCESS_TOKEN", "GROK_SESSION_TOKEN"},
+		ConfigDir: "grok",
+		Label:     "SuperGrok",
+	},
+	"perplexity": {
+		Toggle:    "DECEPTICON_AUTH_PERPLEXITY",
+		TokenEnvs: []string{"PERPLEXITY_ACCESS_TOKEN", "PERPLEXITY_SESSION_TOKEN"},
+		ConfigDir: "perplexity",
+		Label:     "Perplexity Pro",
+	},
+}
+
 // ValidateAuth ensures at least one valid AuthMethod is configured.
 //
-// OAuth path: DECEPTICON_AUTH_CLAUDE_CODE=true (set by the onboard wizard
-// when Claude Code OAuth is selected) requires a parseable
-// ~/.claude/.credentials.json with an access token. LiteLLM mounts the
-// file read-only at runtime; missing or empty fails opaquely on the
-// first prompt unless we catch it here.
+// OAuth paths:
+//   - DECEPTICON_AUTH_CLAUDE_CODE=true requires a parseable
+//     ~/.claude/.credentials.json. LiteLLM mounts that file read-only.
+//   - DECEPTICON_AUTH_<X>=true (CHATGPT, GEMINI, COPILOT, GROK,
+//     PERPLEXITY) is satisfied by a token env var or a token file at its
+//     mounted token directory. ChatGPT uses LiteLLM native OAuth and is
+//     allowed through so LiteLLM can run its device-code login flow.
 //
-// API path: at least one ANTHROPIC / OPENAI / GEMINI / MINIMAX_API_KEY
-// must be set to a non-placeholder, well-formed value.
+// Local LLM path: ollama_local in DECEPTICON_AUTH_PRIORITY (or any
+// OLLAMA_API_BASE configured) is treated as a valid credential. Ollama
+// reachability is probed separately at startup (start.go).
+//
+// API path: at least one configured provider key (ANTHROPIC / OPENAI /
+// GEMINI / MINIMAX / OPENROUTER / NVIDIA / DEEPSEEK / XAI / MISTRAL)
+// must be non-placeholder and well-formed.
 //
 // At least one path must succeed. When OAuth is requested and its
-// credentials file is broken, the API path is checked as a fallback;
-// if both fail, the OAuth error is surfaced because that was the
+// credentials are broken, the other paths are checked as fallbacks;
+// if all fail, the OAuth error is surfaced first because that was the
 // user's explicit choice.
 func ValidateAuth(env map[string]string) error {
-	oauthEnabled := isTruthy(Get(env, "DECEPTICON_AUTH_CLAUDE_CODE", ""))
+	claudeOAuth := isTruthy(Get(env, "DECEPTICON_AUTH_CLAUDE_CODE", ""))
+	ollamaErr := validateOllamaCredentials(env)
 	apiErr := ValidateAPIKeys(env)
 
-	if oauthEnabled {
-		if oauthErr := validateClaudeCredentials(); oauthErr == nil {
+	if claudeOAuth {
+		if err := validateClaudeCredentials(); err == nil {
 			return nil
-		} else if apiErr == nil {
-			return nil
-		} else {
-			return oauthErr
 		}
 	}
+	for _, sub := range oauthSubscriptions {
+		if !isTruthy(Get(env, sub.Toggle, "")) {
+			continue
+		}
+		if err := validateSubscriptionCredentials(env, sub); err == nil {
+			return nil
+		}
+	}
+	if ollamaErr == nil {
+		return nil
+	}
+	if apiErr == nil {
+		return nil
+	}
 
+	// All paths failed — surface the user's explicit choice first.
+	if claudeOAuth {
+		return validateClaudeCredentials()
+	}
+	for _, key := range []string{"chatgpt", "gemini", "copilot", "grok", "perplexity"} {
+		sub := oauthSubscriptions[key]
+		if isTruthy(Get(env, sub.Toggle, "")) {
+			return validateSubscriptionCredentials(env, sub)
+		}
+	}
+	if hasOllamaSelected(env) {
+		return ollamaErr
+	}
 	return apiErr
+}
+
+// hasOllamaSelected returns true when the user has explicitly opted into
+// the local-Ollama auth method (via the priority list or by setting
+// OLLAMA_API_BASE without any other API key).
+func hasOllamaSelected(env map[string]string) bool {
+	priority := strings.ToLower(strings.TrimSpace(env["DECEPTICON_AUTH_PRIORITY"]))
+	for _, m := range strings.Split(priority, ",") {
+		if strings.TrimSpace(m) == "ollama_local" {
+			return true
+		}
+	}
+	return env["OLLAMA_API_BASE"] != ""
+}
+
+// validateOllamaCredentials accepts the Ollama path when the user has
+// either listed ollama_local in DECEPTICON_AUTH_PRIORITY or set
+// OLLAMA_API_BASE directly. Ollama itself has no API key — the
+// only required signal is the base URL pointing at a running instance.
+//
+// We don't probe the URL here; the launcher runs on the host while the
+// LiteLLM container talks to the URL from inside Docker, so a host-side
+// reachability check would lie when the user (correctly) wired up
+// host.docker.internal-style addressing.
+func validateOllamaCredentials(env map[string]string) error {
+	if !hasOllamaSelected(env) {
+		return fmt.Errorf("ollama not configured")
+	}
+	base := strings.TrimSpace(env["OLLAMA_API_BASE"])
+	if base == "" {
+		return fmt.Errorf(
+			"ollama_local selected but OLLAMA_API_BASE is empty.\n" +
+				"Set OLLAMA_API_BASE=http://host.docker.internal:11434 (or your Ollama URL) " +
+				"in ~/.decepticon/.env, or run 'decepticon onboard --reset' to reconfigure.",
+		)
+	}
+	return nil
 }
 
 func isTruthy(s string) bool {
@@ -286,6 +482,87 @@ func validateClaudeCredentials() error {
 	return nil
 }
 
+// validateSubscriptionCredentials verifies the user has at least one credential
+// path wired up for an OAuth subscription handler. The runtime providers
+// walk the same resolution order at runtime:
+//
+//  1. <PROVIDER>_ACCESS_TOKEN env (pre-extracted Bearer)
+//  2. <PROVIDER>_SESSION_TOKEN / _SESSION_COOKIES / _REFRESH_TOKEN env
+//  3. configured token file on disk
+//
+// We don't validate token shape — providers ship them in many formats and shapes
+// drift across versions. We only catch the "toggled on in onboard but never
+// pasted a token" case before the first agent prompt fails opaquely.
+func validateSubscriptionCredentials(env map[string]string, sub subscriptionMethod) error {
+	for _, name := range sub.TokenEnvs {
+		if strings.TrimSpace(env[name]) != "" {
+			return nil
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("locate home directory: %w", err)
+	}
+	paths := subscriptionTokenPaths(env, home, sub)
+	for _, path := range paths {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		}
+	}
+	if sub.AllowInteractiveLogin {
+		return nil
+	}
+	hints := strings.Join(sub.TokenEnvs, " or ")
+	return fmt.Errorf(
+		"%s subscription token not configured.\n"+
+			"Provide one of:\n"+
+			"  - %s env var\n"+
+			"  - %s on disk\n"+
+			"Run 'decepticon onboard --reset' to (re)configure interactively.",
+		sub.Label, hints, strings.Join(paths, " or "),
+	)
+}
+
+func subscriptionTokenPaths(env map[string]string, home string, sub subscriptionMethod) []string {
+	var paths []string
+	if sub.AbsolutePath != "" {
+		// Single-file handler (e.g. ChatGPT → ~/.codex/auth.json).
+		// ConfigDir / TokenFile / LegacyDir do not apply.
+		paths = append(paths, filepath.Join(home, sub.AbsolutePath))
+		return dedupeStrings(paths)
+	}
+	tokenFile := sub.TokenFile
+	if tokenFile == "" {
+		tokenFile = "tokens.json"
+	}
+	if sub.DirEnv != "" {
+		if dir := strings.TrimSpace(Get(env, sub.DirEnv, os.Getenv(sub.DirEnv))); dir != "" {
+			paths = append(paths, filepath.Join(dir, tokenFile))
+		}
+	}
+	paths = append(paths, filepath.Join(home, ".config", sub.ConfigDir, tokenFile))
+	if sub.LegacyDir != "" {
+		paths = append(paths, filepath.Join(home, ".config", sub.LegacyDir, tokenFile))
+	}
+	return dedupeStrings(paths)
+}
+
+func dedupeStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
 // extractClaudeAccessToken walks the credentials JSON in the same resolution order as
 // the LiteLLM handler (config/claude_code_handler.py): current nested format first,
 // then legacy top-level keys. Returns "" if no usable token is present.
@@ -305,7 +582,15 @@ func extractClaudeAccessToken(creds map[string]any) string {
 }
 
 // AppendEnvLine appends a KEY=VALUE line to an existing .env file.
+// If the key is already present, it is left unchanged.
 func AppendEnvLine(path, key, value string) error {
+	existing, _ := os.ReadFile(path)
+	// If key already present, skip
+	for _, line := range strings.Split(string(existing), "\n") {
+		if k, _, ok := parseEnvLine(strings.TrimSpace(line)); ok && k == key {
+			return nil // already set
+		}
+	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -321,4 +606,63 @@ func Get(env map[string]string, key, fallback string) string {
 		return val
 	}
 	return fallback
+}
+
+// MigrateActiveComposeProfiles comments out any active "COMPOSE_PROFILES="
+// line in the .env file.
+//
+// Before ADR-0006 (v1.1.7 and earlier) the OSS .env.example shipped with
+// an active "COMPOSE_PROFILES=c2-sliver" line so `decepticon start`
+// always brought the Sliver C2 container up. ADR-0006 routes every
+// specialist workload (c2-sliver, ad, reversing, …) through the
+// opscontrol daemon; the orchestrator decides when each plane comes up
+// via `ops_start(...)`. A stale active COMPOSE_PROFILES from a v1.1.7-era
+// .env forces those workloads to spawn on every `decepticon start`,
+// defeating the dynamic-spawn design and re-introducing the idle-cost +
+// attack-surface that ADR-0006 was meant to remove.
+//
+// Behaviour:
+//   - rewrites every active "COMPOSE_PROFILES=…" line to a "# Migrated …"
+//     comment, preserving the original value inline so the operator can
+//     restore it by hand if they really want global activation
+//   - commented-out lines are left untouched (idempotent on repeat starts)
+//   - a single ".env.bak" backup is written next to the .env on the first
+//     migration; subsequent migrations skip the backup if one already
+//     exists, so a later edit-and-restart can't silently overwrite the
+//     pre-migration snapshot
+//   - returns (rewrote, error); rewrote=true is the signal for the caller
+//     to surface a one-line notice to the user
+func MigrateActiveComposeProfiles(envPath string) (bool, error) {
+	data, err := os.ReadFile(envPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	lines := strings.Split(string(data), "\n")
+	rewritten := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if k, _, ok := parseEnvLine(trimmed); ok && k == "COMPOSE_PROFILES" {
+			lines[i] = "# [v1.1.8 ADR-0006 migration] specialist workloads now spawn via ops_start; was: " + line
+			rewritten = true
+		}
+	}
+	if !rewritten {
+		return false, nil
+	}
+	backupPath := envPath + ".bak"
+	if _, statErr := os.Stat(backupPath); os.IsNotExist(statErr) {
+		if err := os.WriteFile(backupPath, data, 0o600); err != nil {
+			return false, fmt.Errorf("write backup %s: %w", backupPath, err)
+		}
+	}
+	if err := os.WriteFile(envPath, []byte(strings.Join(lines, "\n")), 0o600); err != nil {
+		return false, err
+	}
+	return true, nil
 }

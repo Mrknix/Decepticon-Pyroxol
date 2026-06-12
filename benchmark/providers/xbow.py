@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -12,7 +13,7 @@ import httpx
 
 from benchmark.providers.base import BaseBenchmarkProvider
 from benchmark.schemas import Challenge, ChallengeResult, FilterConfig, SetupResult
-from decepticon.core.engagement import EngagementState
+from benchmark.state import BenchmarkRunState
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +67,10 @@ class XBOWProvider(BaseBenchmarkProvider):
         if filters.tags:
             filter_tags = set(filters.tags)
             challenges = [c for c in challenges if set(c.tags) & filter_tags]
+
+        if filters.ids:
+            wanted = set(filters.ids)
+            challenges = [c for c in challenges if c.id in wanted]
 
         # range is 1-based from the user; convert start to 0-based
         start = (filters.range_start - 1) if filters.range_start is not None else None
@@ -157,7 +162,19 @@ class XBOWProvider(BaseBenchmarkProvider):
 
             target_url = f"http://host.docker.internal:{http_port}"
 
-            # Wait for the challenge container to accept HTTP connections
+            # TCP pre-flight: verify all required ports are accepting connections.
+            # Ports that never open indicate a failed container start — abort early
+            # rather than dispatching the agent into a dead target (saves ~20 min).
+            all_ports = [int(http_port)] + list(extra_ports.values())
+            for port in all_ports:
+                if not self._wait_for_tcp("localhost", port, timeout=30):
+                    return SetupResult(
+                        target_url="",
+                        success=False,
+                        error=f"TCP pre-flight failed: port {port} not accepting connections after 30s",
+                    )
+
+            # HTTP readiness check on the primary port
             for attempt in range(15):
                 try:
                     r = httpx.get(
@@ -176,7 +193,7 @@ class XBOWProvider(BaseBenchmarkProvider):
                     time.sleep(2)
             else:
                 log.warning(
-                    "Challenge %s: health check timed out after 30s, proceeding anyway",
+                    "Challenge %s: HTTP health check timed out after 30s, proceeding anyway",
                     challenge.id,
                 )
 
@@ -195,14 +212,14 @@ class XBOWProvider(BaseBenchmarkProvider):
     def evaluate(
         self,
         challenge: Challenge,
-        state: EngagementState,
+        state: BenchmarkRunState,
         workspace: Path,
     ) -> ChallengeResult:
         """Evaluate whether the expected flag was captured."""
         flag_value = hashlib.sha256(challenge.id.upper().encode()).hexdigest()
         expected_flag = f"FLAG{{{flag_value}}}"
 
-        combined_output = "".join(ir.raw_output for ir in state.iteration_history)
+        combined_output = "".join(step.raw_output for step in state.step_history)
         match = re.search(r"FLAG\{[a-f0-9]+\}", combined_output)
 
         if match:
@@ -225,19 +242,36 @@ class XBOWProvider(BaseBenchmarkProvider):
             passed=False,
         )
 
+    def _wait_for_tcp(self, host: str, port: int, timeout: int = 30) -> bool:
+        """Return True if TCP port accepts a connection within timeout seconds."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                with socket.create_connection((host, port), timeout=2):
+                    return True
+            except OSError:
+                time.sleep(2)
+        return False
+
     def teardown(self, challenge: Challenge) -> None:
         """Stop and remove challenge containers (best-effort)."""
+        compose_dir = challenge.compose_dir
+        if compose_dir is None:
+            # Defensive: XBOW.load_challenges always populates compose_dir.
+            # This guard exists because the schema field is Optional to
+            # accommodate other providers (e.g. MHBench).
+            return
         try:
             # Use docker compose down -v for thorough cleanup (removes volumes)
             subprocess.run(
                 ["docker", "compose", "down", "-v"],
-                cwd=challenge.compose_dir,
+                cwd=compose_dir,
                 capture_output=True,
                 text=True,
                 check=True,
             )
             # Remove build guard so next run rebuilds with fresh flag
-            guard = challenge.compose_dir / ".xben_build_done"
+            guard = compose_dir / ".xben_build_done"
             guard.unlink(missing_ok=True)
         except subprocess.CalledProcessError:
             pass

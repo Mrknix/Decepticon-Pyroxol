@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/PurpleAILAB/Decepticon/clients/launcher/internal/compose"
 	"github.com/PurpleAILAB/Decepticon/clients/launcher/internal/config"
@@ -10,7 +11,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var forceUpdate bool
+var (
+	forceUpdate   bool
+	updateChannel string
+)
 
 var updateCmd = &cobra.Command{
 	Use:   "update",
@@ -19,14 +23,28 @@ var updateCmd = &cobra.Command{
 }
 
 func init() {
-	updateCmd.Flags().BoolVarP(&forceUpdate, "force", "f", false, "Force re-pull images even if version unchanged")
+	updateCmd.Flags().BoolVarP(&forceUpdate, "force", "f", false, "Refresh config files and Docker images even if version unchanged")
+	updateCmd.Flags().StringVar(&updateChannel, "channel", "", "Update channel for this run: stable (soaked final) or latest (newest final). Default: DECEPTICON_CHANNEL in .env, else stable")
 	rootCmd.AddCommand(updateCmd)
 }
 
 func runUpdate(cmd *cobra.Command, args []string) error {
-	ui.Info("Checking for updates...")
+	// Load env first so the channel (and branch override) are known
+	// before the release fetch.
+	env := make(map[string]string)
+	if config.EnvExists() {
+		env, _ = config.LoadEnv(config.EnvPath())
+	}
+	// --channel overrides .env for this invocation only.
+	rawChannel := updateChannel
+	if rawChannel == "" {
+		rawChannel = config.Get(env, "DECEPTICON_CHANNEL", "")
+	}
+	ch := updater.ResolveChannel(rawChannel)
 
-	release, err := updater.FetchLatestRelease()
+	ui.Info(fmt.Sprintf("Checking for updates (%s channel)...", ch))
+
+	release, err := updater.FetchRelease(ch)
 	if err != nil {
 		return fmt.Errorf("check updates: %w", err)
 	}
@@ -39,35 +57,41 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 
 	if hasUpdate {
 		ui.Info(fmt.Sprintf("Update available: %s → %s", version, release.TagName))
+	} else {
+		ui.Info("Refreshing configuration files and Docker images...")
 	}
 
-	// Load env for branch info
-	env := make(map[string]string)
-	if config.EnvExists() {
-		env, _ = config.LoadEnv(config.EnvPath())
-	}
-	branch := config.Get(env, "DECEPTICON_BRANCH", "main")
-
-	// Sync config files
-	ui.Info("Syncing configuration files...")
-	if err := updater.SyncConfigFiles(branch); err != nil {
-		ui.Warning("Config sync: " + err.Error())
+	ref := release.TagName
+	if branch := strings.TrimSpace(env["DECEPTICON_BRANCH"]); branch != "" {
+		ref = branch
 	}
 
-	// Pull new images
-	c := compose.New()
-	targetVersion := release.TagName
-	ui.Info("Pulling Docker images (" + targetVersion + ")...")
-	if err := c.Pull(targetVersion); err != nil {
-		ui.Warning("Image pull: " + err.Error())
-	}
-
-	// Self-update binary
 	if hasUpdate {
-		if err := updater.SelfUpdate(release); err != nil {
-			ui.Warning("Binary update: " + err.Error())
+		// Full upgrade flow — shared with the launch-time interactive
+		// prompt so behavior stays consistent between the two paths.
+		if err := updater.ApplyUpdate(release, ref); err != nil {
+			ui.Warning(err.Error())
 		}
-		_ = updater.WriteVersion(release.TagName)
+	} else {
+		// --force: re-sync config + re-pull images without bumping the
+		// binary (already on release.TagName).
+		ui.Info("Syncing configuration files...")
+		// Mirror ApplyUpdate's release/branch split: pass the Release
+		// through when ref tracks the tag so the manifest verifies, nil
+		// when DECEPTICON_BRANCH is overriding the ref (branch mode).
+		syncRelease := release
+		if ref != release.TagName && ref != strings.TrimPrefix(release.TagName, "v") {
+			syncRelease = nil
+		}
+		if err := updater.SyncConfigFiles(ref, syncRelease); err != nil {
+			ui.Warning("Config sync: " + err.Error())
+		}
+		c := compose.New()
+		targetVersion := strings.TrimPrefix(release.TagName, "v")
+		ui.Info("Pulling Docker images (" + targetVersion + ")...")
+		if err := c.Pull(targetVersion); err != nil {
+			ui.Warning("Image pull: " + err.Error())
+		}
 	}
 
 	ui.Success("Update complete")

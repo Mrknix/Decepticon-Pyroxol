@@ -70,7 +70,8 @@ Use these commands rather than inventing new workflows:
 docker compose -f docker-compose.yml -f docker-compose.safe.yml config --quiet
 docker compose -f docker-compose.yml -f docker-compose.safe.yml config --services
 docker compose -f docker-compose.yml -f docker-compose.safe.yml up -d --build \
-  postgres neo4j litellm langgraph sandbox web
+  postgres neo4j sandbox litellm skillogy langgraph
+docker compose -f docker-compose.yml -f docker-compose.safe.yml --profile web up -d web
 docker compose -f docker-compose.yml -f docker-compose.safe.yml ps
 docker compose -f docker-compose.yml -f docker-compose.safe.yml down
 ```
@@ -104,7 +105,7 @@ Database/web setup tools already used by this repo:
 - Prisma through `npx prisma ...` in `clients/web`.
 - PostgreSQL in Docker Compose.
 - Neo4j in Docker Compose.
-- LangGraph/LiteLLM through Docker Compose.
+- LangGraph/LiteLLM/Skillogy through Docker Compose.
 
 Do not install alternative package managers or app frameworks unless the repo
 already uses them or the operator explicitly asks.
@@ -127,6 +128,8 @@ Use these files directly:
 - Do not run `docker compose up` without `docker-compose.safe.yml` for the safe
   setup path.
 - Do not set `COMPOSE_PROFILES=c2-sliver` unless C2 is explicitly authorized.
+- Do not set `COMPOSE_PROFILES=ad` unless AD/BHCE tooling is explicitly authorized.
+- Do not set `COMPOSE_PROFILES=reversing` unless reversing/Ghidra tooling is explicitly authorized.
 - Do not set `COMPOSE_PROFILES=victims` unless running a local lab/demo.
 - Do not use the Windows/WSL local model from the VM during API-first setup.
 - Do not run destructive git commands such as `git reset --hard` unless the

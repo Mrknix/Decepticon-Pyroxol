@@ -3,7 +3,11 @@
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose v2
-- An API key for at least one LLM provider (Anthropic, OpenAI, Google, or MiniMax) — or an OAuth subscription (Claude Code, Codex)
+- An LLM provider credential — one of:
+  - **Tier-mapped API keys** (works out of the box): Anthropic, OpenAI, Google Gemini, MiniMax, DeepSeek, xAI, Mistral, OpenRouter, Nvidia NIM
+  - **Local LLM**: Ollama (`OLLAMA_API_BASE` + `OLLAMA_MODEL`)
+  - **Subscription OAuth** (no per-token billing): Claude Max/Pro/Team, ChatGPT Pro/Plus/Team, Gemini Advanced, Microsoft Copilot Pro, xAI SuperGrok, Perplexity Pro
+  - **Other providers** (Groq, Cohere, Together, Fireworks, Perplexity API, Azure, AWS Bedrock, Replicate, custom OpenAI-compatible gateway): supported via `DECEPTICON_MODEL` / `DECEPTICON_LITELLM_MODELS` ad-hoc registration
 
 That's it. Everything else runs inside containers.
 
@@ -27,11 +31,13 @@ decepticon onboard
 
 The interactive setup wizard guides you through:
 
-1. **Authentication** — API key or OAuth (Claude Code, Codex)
-2. **Provider** — Anthropic, OpenAI, Google, or MiniMax
-3. **API Key** — Enter your provider key (skipped for OAuth)
-4. **Model Profile** — `eco` (balanced), `max` (performance), or `test` (development)
+1. **Authentication** — API key, subscription OAuth (Claude / ChatGPT / Gemini / Copilot / SuperGrok / Perplexity), or local Ollama
+2. **Provider** — choose one of the tier-mapped providers, configure OAuth, or point at a local Ollama
+3. **Credentials** — API key, OAuth token, or endpoint URL (depending on auth method)
+4. **Model Profile** — `eco` (balanced), `max` (performance), `test` (development)
 5. **LangSmith** — Optional tracing for LLM observability
+
+For detailed provider setup including OAuth configuration, see [Setup Guide](setup-guide.md).
 
 Configuration is saved to `~/.decepticon/.env`. Run `decepticon onboard --reset` to reconfigure.
 
@@ -44,33 +50,11 @@ Configuration is saved to `~/.decepticon/.env`. Run `decepticon onboard --reset`
 decepticon
 ```
 
-Starts all services (LiteLLM, LangGraph, Neo4j, sandbox) and opens the interactive terminal UI.
+Starts all services (PostgreSQL, LiteLLM, LangGraph, Neo4j, sandbox, C2 server, web dashboard) and opens the interactive terminal UI.
 
 **Web Dashboard** (browser):
 
 The web dashboard starts as part of the default stack — it's reachable at `http://localhost:3000` once `decepticon` (or `make dev` for contributors) is running.
-
----
-
-## Try the Demo
-
-The demo runs a complete autonomous kill chain against a local Metasploitable 2 target — no setup needed beyond your API key.
-
-```bash
-decepticon demo
-```
-
-**What happens:**
-1. Metasploitable 2 is launched as a target VM
-2. A pre-built engagement (RoE + OPPLAN) is loaded
-3. The agent executes autonomously:
-   - Port scan and service enumeration
-   - vsftpd 2.3.4 backdoor exploitation
-   - Sliver C2 implant deployment
-   - Credential harvesting via C2 session
-   - Internal network reconnaissance
-
-The demo is read-only — it doesn't modify anything on your host.
 
 ---
 
@@ -81,8 +65,8 @@ The demo is read-only — it doesn't modify anything on your host.
    - Target scope (IP range, URL, Git repo, file upload, or local path)
    - Threat actor profile
    - Rules of Engagement (authorized scope, timing, exclusions)
-3. Soundwave generates: **RoE → ConOps → Deconfliction Plan → OPPLAN**
-4. You review and approve the OPPLAN
+3. Soundwave writes the eight-document engagement bundle (RoE, Threat Profile, CONOPS, Deconfliction, Contact, Data Handling, Abort, Cleanup)
+4. The orchestrator builds the OPPLAN from the bundle — you review and approve it
 5. The autonomous loop begins
 
 > **Important**: Only run Decepticon against systems you own or have explicit written authorization to test. See the disclaimer in the main README.

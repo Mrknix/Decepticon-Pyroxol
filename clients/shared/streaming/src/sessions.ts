@@ -6,7 +6,7 @@
  * useSubAgentSessions hook for cross-platform reuse.
  */
 
-import type { StreamEvent } from "./types";
+import type { StreamEvent } from "./types.js";
 
 /** A sub-agent execution session derived from the event stream. */
 export interface SubAgentSession {
@@ -45,8 +45,19 @@ export function deriveSubAgentSessions(events: readonly StreamEvent[]): SubAgent
   const sessions: SubAgentSession[] = [];
   const openSessions = new Map<string, SubAgentSession>();
 
+  // Per-invocation key. The backend's StreamingRunnable now stamps every
+  // emit with a unique `sessionId`; older event streams (and any consumer
+  // that hasn't picked up the new field yet) fall back to the agent name.
+  // Falling back drops parallel-same-agent grouping but at least keeps
+  // single-agent runs working.
+  const sessionKey = (e: StreamEvent): string =>
+    (e.sessionId ?? "") + "::" + (e.subagent ?? "");
+
   for (const event of events) {
-    if (event.type === "subagent_start" && event.subagent) {
+    if (!event.subagent) continue;
+    const key = sessionKey(event);
+
+    if (event.type === "subagent_start") {
       const session: SubAgentSession = {
         id: event.id,
         agent: event.subagent,
@@ -57,21 +68,23 @@ export function deriveSubAgentSessions(events: readonly StreamEvent[]): SubAgent
         startTime: event.timestamp,
         status: "running",
       };
-      openSessions.set(event.subagent, session);
+      openSessions.set(key, session);
       sessions.push(session);
-    } else if (event.type === "subagent_end" && event.subagent) {
-      const session = openSessions.get(event.subagent);
+    } else if (event.type === "subagent_end") {
+      const session = openSessions.get(key);
       if (session) {
         session.endEventId = event.id;
         session.endTime = event.timestamp;
-        session.status = event.type === "subagent_end" && (event as { status?: string }).status === "error"
-          ? "error"
-          : "completed";
+        // Detect failure from either the CLI-normalized `status` field or the
+        // raw backend `error` boolean (SubagentCustomEvent). The enclosing
+        // branch already guarantees this is a `subagent_end` event.
+        session.status =
+          event.status === "error" || event.error === true ? "error" : "completed";
         session.eventIds.push(event.id);
-        openSessions.delete(event.subagent);
+        openSessions.delete(key);
       }
-    } else if (event.subagent) {
-      const session = openSessions.get(event.subagent);
+    } else {
+      const session = openSessions.get(key);
       if (session) {
         session.eventIds.push(event.id);
         if (event.type === "tool_result" || event.type === "bash_result") {

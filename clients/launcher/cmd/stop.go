@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"github.com/PurpleAILAB/Decepticon/clients/launcher/cmd/opscontrol"
 	"github.com/PurpleAILAB/Decepticon/clients/launcher/internal/compose"
 	"github.com/PurpleAILAB/Decepticon/clients/launcher/internal/ui"
 	"github.com/spf13/cobra"
@@ -13,12 +14,17 @@ var stopCmd = &cobra.Command{
 		c := compose.New()
 		ui.Info("Stopping Decepticon services...")
 		c.RemoveOrphanedCLI()
-		// Clear bash-tool scratch buffers before tearing the stack down so
-		// /workspace/.scratch does not accumulate across engagements. Must run
-		// while the sandbox is still up; CleanScratch is a no-op otherwise.
+		// Clear legacy root-level scratch/session buffers before tearing the
+		// stack down. Current runs keep these under engagement workspaces.
 		c.CleanScratch()
 		if err := c.Down(); err != nil {
 			return err
+		}
+		// Tear down the opscontrol daemon after compose so any
+		// workload it owned has already been removed by `compose down`.
+		// Non-fatal: a never-started daemon is a no-op here.
+		if err := opscontrol.Stop(); err != nil {
+			ui.Warning("opscontrol stop: " + err.Error())
 		}
 		ui.Success("All services stopped")
 		return nil

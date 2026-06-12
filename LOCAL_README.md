@@ -12,12 +12,15 @@ Added repo files for running Decepticon in a safer pentest posture:
   - Safe Docker Compose override for VM use.
   - Replaces exposed ports with `127.0.0.1` bindings.
   - Uses VM-local workspace paths under `${DECEPTICON_HOME}/workspace`.
-  - Adds `no-new-privileges:true` to the sandbox container.
+  - Preserves upstream sandbox hardening and pins the safe workspace mount.
+  - Adds loopback binding for the Skillogy service added upstream.
 - `.env.safe.example`
   - Safe environment template.
   - Uses `DECEPTICON_MODEL_PROFILE=test`.
-  - Keeps `COMPOSE_PROFILES=` so C2 and victim services do not start by default.
-  - Includes placeholder provider keys and local infrastructure secrets.
+  - Keeps `COMPOSE_PROFILES=` so profile-gated specialist workloads do not
+    start by default.
+  - Includes placeholder provider keys, Skillogy defaults, and local
+    infrastructure secrets.
 - `scripts/decepticon-vpn-killswitch.nft`
   - nftables VPN kill-switch template.
   - Allows outbound traffic only through the approved VPN interface after
@@ -50,8 +53,8 @@ postgres
 neo4j
 sandbox
 litellm
+skillogy
 langgraph
-web
 ```
 
 Notes:
@@ -186,6 +189,7 @@ Required secret changes before real client work:
 - Replace `LITELLM_SALT_KEY`.
 - Replace `POSTGRES_PASSWORD`.
 - Replace `NEO4J_PASSWORD`.
+- Replace optional BHCE secrets before enabling the `ad` profile.
 
 VPN and egress:
 
@@ -233,15 +237,15 @@ postgres
 neo4j
 sandbox
 litellm
+skillogy
 langgraph
-web
 ```
 
 Start core safe stack:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.safe.yml up -d --build \
-  postgres neo4j litellm langgraph sandbox web
+  postgres neo4j sandbox litellm skillogy langgraph
 ```
 
 Health checks:
@@ -249,15 +253,22 @@ Health checks:
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.safe.yml ps
 curl -fsS http://127.0.0.1:2024/ok
-curl -fsS http://127.0.0.1:3000 >/dev/null
+curl -fsS http://127.0.0.1:9100/v1/health
 docker exec decepticon-sandbox curl -4 https://ifconfig.me
+```
+
+Start the web dashboard only when needed:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.safe.yml --profile web up -d web
+curl -fsS http://127.0.0.1:3000 >/dev/null
 ```
 
 Containment checks:
 
 ```bash
-docker ps --format '{{.Names}}' | grep -E 'c2|dvwa|msf2' && echo "unexpected profile running"
-ss -ltnp | grep -E ':(2024|3000|3003|4000|5432|7474|7687)\b'
+docker ps --format '{{.Names}}' | grep -E 'c2|bhce|ghidra|dvwa|msf2' && echo "unexpected profile running"
+ss -ltnp | grep -E ':(2024|3000|3003|4000|5432|7474|7687|8081|9100)\b'
 docker exec decepticon-sandbox find /workspace -maxdepth 2 -type f | head
 ```
 
@@ -284,6 +295,22 @@ Instruction for the next agent:
 - Do not start Decepticon on the main host.
 - Use API-first LLM configuration.
 - Do not bridge to the Windows/WSL local model.
+
+## 2026-06-12 - Upstream v1.1.14 Merge
+
+Merged current `origin/main` / `upstream/main` into `mobile-command` to bring
+in upstream fixes and feature work through `v1.1.14`.
+
+Mobile setup files were preserved and refreshed for the current runtime:
+
+- Core safe stack is now `postgres`, `neo4j`, `sandbox`, `litellm`,
+  `skillogy`, and `langgraph`.
+- Web dashboard is profile-gated and should be started with `--profile web`
+  only when needed.
+- Specialist workloads remain disabled by default through empty
+  `COMPOSE_PROFILES=`.
+- The safe environment template includes the expanded provider list, Skillogy
+  defaults, and BHCE secret placeholders.
 
 ## 2026-04-30 - Next Agent Handoff Checklist
 

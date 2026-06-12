@@ -7,12 +7,11 @@
 | `decepticon` | Start all services, open the terminal UI, and print the web dashboard URL |
 | `decepticon onboard` | Interactive setup wizard (provider, API key, model profile, LangSmith) |
 | `decepticon onboard --reset` | Reconfigure even if `.env` already exists |
-| `decepticon demo` | Run guided demo (Metasploitable 2, full kill chain + Sliver C2) |
 | `decepticon stop` | Stop all services |
 | `decepticon status` | Show service status |
 | `decepticon logs [service]` | Follow service logs (default: `langgraph`) |
 | `decepticon kg-health` | Diagnose the Neo4j knowledge graph |
-| `decepticon update` | Check for updates and apply them |
+| `decepticon update` | Explicitly refresh config files, Docker images, and the launcher binary when a release is available |
 | `decepticon remove` | Uninstall Decepticon completely |
 | `decepticon --version` | Show installed version |
 
@@ -102,8 +101,14 @@ These can be set in your `.env` file (configure with `decepticon onboard`) or as
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DECEPTICON_MODEL_PROFILE` | `eco` | Tier preset: `eco` (per-agent), `max` (all HIGH), or `test` (all LOW) |
-| `DECEPTICON_AUTH_PRIORITY` | `anthropic_oauth,anthropic_api,openai_api,google_api,minimax_api` | Comma-separated AuthMethod priority — first method primary, rest are fallbacks |
-| `DECEPTICON_AUTH_CLAUDE_CODE` | `false` | Set `true` to route Anthropic models via Claude Code OAuth (auth/* in LiteLLM) |
+| `DECEPTICON_AUTH_PRIORITY` | (built-in order; see [Models](models.md)) | Comma-separated AuthMethod priority — first method primary, rest are fallbacks. When unset, the factory's built-in `_DEFAULT_AUTH_PRIORITY` order applies. Methods whose credential isn't configured are skipped at runtime. |
+| `DECEPTICON_AUTH_CLAUDE_CODE` | `false` | Set `true` to route Anthropic models via Claude Code OAuth (`auth/claude-*` in LiteLLM) |
+| `DECEPTICON_AUTH_CHATGPT` | `false` | Set `true` to route OpenAI models via ChatGPT subscription OAuth (`auth/gpt-*`) |
+| `DECEPTICON_AUTH_GEMINI` | `false` | Set `true` to route Google models via Gemini Advanced OAuth (`gemini-sub/*`) |
+| `DECEPTICON_AUTH_COPILOT` | `false` | Set `true` for Microsoft Copilot Pro OAuth (`copilot/*`) |
+| `DECEPTICON_AUTH_GROK` | `false` | Set `true` for xAI SuperGrok OAuth (`grok-sub/*`) |
+| `DECEPTICON_AUTH_PERPLEXITY` | `false` | Set `true` for Perplexity Pro OAuth (`pplx-sub/*`) |
+| `OLLAMA_API_BASE` / `OLLAMA_MODEL` | unset | When set, registers `ollama_chat/<OLLAMA_MODEL>` and enables the `ollama_local` AuthMethod |
 
 See [Models](models.md) for the full Tier × AuthMethod matrix and chain examples.
 
@@ -123,14 +128,20 @@ See [Models](models.md) for the full Tier × AuthMethod matrix and chain example
 | `LANGGRAPH_PORT` | `2024` | LangGraph API server port |
 | `LITELLM_PORT` | `4000` | LiteLLM proxy port |
 | `POSTGRES_PORT` | `5432` | PostgreSQL port |
+| `WEB_PORT` | `3000` | Web dashboard port |
+| `TERMINAL_PORT` | `3003` | Terminal WebSocket bridge for the embedded CLI |
+
+Neo4j ports (`7474` browser, `7687` bolt) are fixed in `docker-compose.yml`.
 
 ### C2 Framework
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `COMPOSE_PROFILES` | `c2-sliver` | Active Docker Compose profile |
+| `COMPOSE_PROFILES` | _(empty)_ | Explicit profile override. Leave empty for normal use — heavyweight workloads are spawned on demand by the orchestrator via `ops_start(...)` ([ADR-0006](adr/0006-agent-driven-container-lifecycle.md)). |
 
-Currently supported profiles: `c2-sliver`. Future: `c2-havoc`.
+Set explicitly only when you want a workload up at launch — e.g. `COMPOSE_PROFILES=cli,c2-sliver,ad,reversing` for CI regression runs against the whole matrix.
+
+Currently allowlisted workloads (the agent can call `ops_start("X")` for any of these): `ad`, `c2-sliver`, `c2-havoc`, `reversing`, `cloud`, `mobile`, `phishing`, `forensics`, `ics`, `iot`, `supply-chain`, `wireless`. Future C2 frameworks (Havoc, Mythic) plug in as additional `c2-*` profile services.
 
 ### Observability (optional)
 

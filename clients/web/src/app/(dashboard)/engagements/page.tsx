@@ -20,7 +20,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Plus, GitBranch, Globe, Server } from "lucide-react";
+import { Plus, Globe, Server } from "lucide-react";
 interface Engagement {
   id: string;
   name: string;
@@ -38,8 +38,7 @@ const statusColors: Record<string, string> = {
   failed: "bg-red-500/10 text-red-400 border-red-500/20",
 };
 
-const targetIcons: Record<string, typeof GitBranch> = {
-  github_repo: GitBranch,
+const targetIcons: Record<string, typeof Globe> = {
   web_url: Globe,
   ip_range: Server,
 };
@@ -49,14 +48,27 @@ export default function EngagementsPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let active = true;
     fetch("/api/engagements")
       .then((res) => {
         if (!res.ok) throw new Error("fetch failed");
         return res.json();
       })
-      .then((data: Engagement[]) => setEngagements(data))
-      .catch(() => setEngagements([]))
-      .finally(() => setLoading(false));
+      .then((data: Engagement[]) => {
+        if (!active) return;
+        setEngagements(data);
+      })
+      .catch(() => {
+        if (!active) return;
+        setEngagements([]);
+      })
+      .finally(() => {
+        if (!active) return;
+        setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
   }, []);
 
   return (

@@ -9,6 +9,7 @@ import {
   Crosshair,
   Radio,
   ClipboardList,
+  Clock,
   FolderOpen,
   FileWarning,
   Network,
@@ -16,13 +17,8 @@ import {
   ChevronLeft,
   ChevronRight,
   ChevronDown,
-  Globe,
-  Building,
-  CreditCard,
-  ScrollText,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { hasEE } from "@/lib/ee";
 import { Button } from "@/components/ui/button";
 import {
   Tooltip,
@@ -47,17 +43,10 @@ const globalNav: NavItem[] = [
 const engagementNav: NavItem[] = [
   { href: "/live", label: "Live", icon: Radio, engagementScoped: true },
   { href: "/plan", label: "Plan", icon: ClipboardList, engagementScoped: true },
+  { href: "/timeline", label: "Timeline", icon: Clock, engagementScoped: true },
   { href: "/documents", label: "Documents", icon: FolderOpen, engagementScoped: true },
   { href: "/findings", label: "Findings", icon: FileWarning, engagementScoped: true },
   { href: "/graph", label: "Attack Graph", icon: Network, engagementScoped: true },
-];
-
-// EE-only navigation — visible when @decepticon/ee is installed
-const eeNav: NavItem[] = [
-  { href: "/domains", label: "Domains", icon: Globe },
-  { href: "/settings/org", label: "Organization", icon: Building },
-  { href: "/billing", label: "Billing", icon: CreditCard },
-  { href: "/audit-log", label: "Audit Log", icon: ScrollText },
 ];
 
 const bottomNav: NavItem[] = [
@@ -75,8 +64,10 @@ export function Sidebar() {
   const [engDropdownOpen, setEngDropdownOpen] = useState(false);
   const [engagements, setEngagements] = useState<Engagement[]>([]);
 
-  // Refetch on every navigation — picks up newly created engagements
-  // when the user is redirected from /engagements/new to /engagements/:id.
+  // Derive engagement ID from pathname — only refetch when engagement context changes
+  const engMatch = pathname.match(/^\/engagements\/([^/]+)/);
+  const activeEngId = engMatch?.[1] ?? null;
+
   useEffect(() => {
     let cancelled = false;
     fetch("/api/engagements")
@@ -91,11 +82,8 @@ export function Sidebar() {
         if (!cancelled) setEngagements([]);
       });
     return () => { cancelled = true; };
-  }, [pathname]);
+  }, [activeEngId]);
 
-  // Detect active engagement from URL
-  const engMatch = pathname.match(/^\/engagements\/([^/]+)/);
-  const activeEngId = engMatch?.[1] ?? null;
   const activeEng = activeEngId
     ? engagements.find((e) => e.id === activeEngId) ?? null
     : null;
@@ -242,27 +230,6 @@ export function Sidebar() {
             {engagementNav.map(renderNavItem)}
           </div>
         </div>
-
-        {/* EE-only nav — domains, org, billing, audit */}
-        {hasEE() && (
-          <>
-            <div className="px-3">
-              <Separator className="opacity-50" />
-            </div>
-            <div className="p-2">
-              {!collapsed && (
-                <div className="mb-1 px-3">
-                  <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/50">
-                    Platform
-                  </span>
-                </div>
-              )}
-              <div className="space-y-0.5">
-                {eeNav.map(renderNavItem)}
-              </div>
-            </div>
-          </>
-        )}
 
         <div className="flex-1" />
 

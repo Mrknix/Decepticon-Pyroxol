@@ -3,7 +3,7 @@
 # Usage:
 #   cp .env.safe.example .env
 #   docker compose -f docker-compose.yml -f docker-compose.safe.yml up -d --build \
-#     postgres neo4j litellm langgraph sandbox web
+#     postgres neo4j sandbox litellm skillogy langgraph
 #
 # This profile is intended to run inside a dedicated VM. It keeps service ports
 # bound to VM loopback and stores all engagement data under a VM-local path.
@@ -25,15 +25,15 @@ services:
   sandbox:
     volumes: !override
       - ${DECEPTICON_ENGAGEMENT_WORKSPACE:-${DECEPTICON_HOME:-./.decepticon}/workspace}:/workspace
-    security_opt:
-      - no-new-privileges:true
-    mem_limit: 4g
     cpus: 2.0
-    pids_limit: 1024
 
   langgraph:
     ports: !override
       - "127.0.0.1:${LANGGRAPH_PORT:-2024}:2024"
+
+  skillogy:
+    ports: !override
+      - "127.0.0.1:${SKILLOGY_REST_PORT:-9100}:9100"
 
   web:
     ports: !override
@@ -41,3 +41,7 @@ services:
       - "127.0.0.1:${TERMINAL_PORT:-3003}:3003"
     volumes: !override
       - ${DECEPTICON_HOME:-./.decepticon}/workspace:/workspace
+
+  bhce:
+    ports: !override
+      - "127.0.0.1:${BHCE_PORT:-8081}:8080"

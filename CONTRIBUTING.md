@@ -65,7 +65,7 @@ Use the [Feature Request](https://github.com/PurpleAILAB/Decepticon/issues/new?t
 - **Line length**: 100 characters
 - **Imports**: Absolute imports, public API re-exported through `__init__.py`
 - **Logging**: `from decepticon.core.logging import get_logger; log = get_logger("module.sub")`
-- **Skills**: Markdown files in `skills/` with YAML frontmatter
+- **Skills**: Markdown files in `decepticon/skills/` with YAML frontmatter
 - **CLI (TypeScript)**: Ink.js components in `clients/cli/src/`
 
 ## Project Structure
@@ -73,12 +73,47 @@ Use the [Feature Request](https://github.com/PurpleAILAB/Decepticon/issues/new?t
 ```
 decepticon/          Python agents, core logic, backends
 clients/cli/         Ink.js terminal UI (TypeScript)
-skills/              Markdown knowledge base for agents
+decepticon/skills/   Markdown knowledge base for agents
 containers/          Dockerfiles
 config/              Runtime configuration
 scripts/             Installer and utilities
 docs/                Documentation
 ```
+
+## Authoring Skills
+
+Every `packages/decepticon/decepticon/skills/**/SKILL.md` file must
+conform to the schema in [docs/skill-schema.md](docs/skill-schema.md).
+Before opening a PR, run `make audit-skills` locally and fix any
+reported violations. CI runs the same check on every PR.
+
+For the cleanup of legacy skills that pre-date the schema, see
+[docs/skill-cleanup-process.md](docs/skill-cleanup-process.md). New
+authors writing skills against the schema do not need to read the
+cleanup process — only the schema doc.
+
+## Working with AI assistants
+
+If any material part of your contribution was produced with an AI
+coding agent (Claude, Codex, Copilot, Cursor, etc.), read
+[CONTRIBUTING_AGENT.md](CONTRIBUTING_AGENT.md) before opening a PR. It
+restates a few [docs/COWORK.md](docs/COWORK.md) rules in their
+AI-contributor framing and adds a short self-review checklist. The
+checklist is not enforced by CI; it is the bar a maintainer reviews
+against.
+
+## Architecture decisions
+
+Non-obvious architectural decisions — middleware composition order,
+sandbox transport mechanism, C2 framework selection, network-isolation
+invariants — are recorded as numbered, append-only ADRs under
+[docs/adr/](docs/adr/). See [docs/adr/README.md](docs/adr/README.md)
+for when to write one and the format. If your PR depends on or reverses
+an architectural decision, link the ADR from the PR description.
+
+## Releases
+
+Maintainers: see [RELEASE.md](RELEASE.md) for the versioning model and the release process.
 
 ## Security
 

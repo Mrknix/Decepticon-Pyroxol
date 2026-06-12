@@ -6,7 +6,11 @@
 #   curl -fsSL https://decepticon.red/install | bash
 #
 # Environment variables:
-#   VERSION              — Install a specific version (default: latest)
+#   CHANNEL              — Update channel (default: stable):
+#                            stable — newest final release baked >= SOAK days
+#                            latest — newest final release, immediately
+#   DECEPTICON_STABLE_SOAK_DAYS — stable soak window (default: 7)
+#   VERSION              — Install a specific version (overrides CHANNEL)
 #   DECEPTICON_HOME      — Install directory (default: ~/.decepticon)
 #   SKIP_PULL            — Skip Docker image pull (default: false)
 # ─────────────────────────────────────────────────────────────────────
@@ -16,7 +20,26 @@ set -euo pipefail
 # ── Constants ─────────────────────────────────────────────────────
 REPO="PurpleAILAB/Decepticon"
 BRANCH="${BRANCH:-main}"
+
+# Update channel (Claude-Code-style soak model; both are final-only):
+#   stable (default) — newest FINAL release baked >= STABLE_SOAK_DAYS
+#   latest           — newest FINAL release, immediately
+# Decepticon defaults to stable (conservative for a security tool); the
+# channel *semantics* match Claude Code, only the default differs.
+# Default + any unrecognized value resolves to stable.
+CHANNEL="$(printf '%s' "${CHANNEL:-stable}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+case "$CHANNEL" in
+    latest) ;;
+    *) CHANNEL="stable" ;;
+esac
+# Days the stable channel waits before adopting a final release.
+STABLE_SOAK_DAYS="${DECEPTICON_STABLE_SOAK_DAYS:-7}"
 RAW_BASE="https://raw.githubusercontent.com/$REPO/$BRANCH"
+# release asset base — same host every install, used for binary +
+# checksum manifests. raw.githubusercontent.com hosts the source-tree
+# copy of compose/litellm; their integrity is verified against
+# config-checksums.txt fetched from RELEASE_BASE.
+RELEASE_BASE="https://github.com/$REPO/releases/download"
 
 # ── Colors ────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -40,47 +63,159 @@ preflight() {
         exit 1
     fi
 
-    # Docker
-    if ! command -v docker >/dev/null 2>&1; then
-        error "Error: Docker is required but not installed."
-        echo -e "${DIM}Install Docker: ${NC}https://docs.docker.com/get-docker/"
+    # Container runtime — Docker (preferred) OR Podman 4.4+ (compose v2
+    # compatible). Honor explicit DECEPTICON_CONTAINER_RUNTIME override
+    # if the user is on a non-default setup (e.g. nerdctl, Rancher Desktop).
+    local rt="${DECEPTICON_CONTAINER_RUNTIME:-}"
+    if [[ -z "$rt" ]]; then
+        if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+            rt="docker"
+        elif command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
+            rt="podman"
+        else
+            error "Error: no container runtime found."
+            echo -e "${DIM}Install one of:${NC}"
+            echo -e "${DIM}  Docker:  ${NC}https://docs.docker.com/get-docker/"
+            echo -e "${DIM}  Podman:  ${NC}https://podman.io/docs/installation"
+            echo -e "${DIM}  …or set DECEPTICON_CONTAINER_RUNTIME=nerdctl${NC}"
+            exit 1
+        fi
+    elif ! command -v "$rt" >/dev/null 2>&1 || ! "$rt" info >/dev/null 2>&1; then
+        error "Error: DECEPTICON_CONTAINER_RUNTIME=$rt requested but unusable."
         exit 1
     fi
+    info "Container runtime: $rt"
 
-    # Docker daemon
-    if ! docker info >/dev/null 2>&1; then
-        error "Error: Docker daemon is not running."
-        echo -e "${DIM}Start Docker and re-run the installer.${NC}"
-        exit 1
+    # Compose v2 — required for the multi-file `docker compose up --wait`
+    # pattern. Docker Desktop ships it; Podman 4.4+ ships `podman compose`
+    # built-in (fallback: the podman-compose Python wrapper).
+    if [[ "$rt" == "docker" ]]; then
+        if ! docker compose version >/dev/null 2>&1; then
+            error "Error: Docker Compose v2 is required."
+            echo -e "${DIM}Docker Compose is included with Docker Desktop.${NC}"
+            echo -e "${DIM}For Linux: ${NC}https://docs.docker.com/compose/install/linux/"
+            exit 1
+        fi
+    elif [[ "$rt" == "podman" ]]; then
+        if ! podman compose --help >/dev/null 2>&1 \
+            && ! command -v podman-compose >/dev/null 2>&1; then
+            error "Error: 'podman compose' (Podman 4.4+) or 'podman-compose' is required."
+            echo -e "${DIM}Install: ${NC}https://github.com/containers/podman-compose"
+            exit 1
+        fi
     fi
 
-    # Docker Compose v2
-    if ! docker compose version >/dev/null 2>&1; then
-        error "Error: Docker Compose v2 is required."
-        echo -e "${DIM}Docker Compose is included with Docker Desktop.${NC}"
-        echo -e "${DIM}For Linux: ${NC}https://docs.docker.com/compose/install/linux/"
+    # sha256 tool — required for download integrity verification. Linux
+    # ships sha256sum; macOS ships shasum (-a 256). Either is acceptable.
+    if ! command -v sha256sum >/dev/null 2>&1 \
+        && ! command -v shasum     >/dev/null 2>&1; then
+        error "Error: neither sha256sum nor shasum found."
+        echo -e "${DIM}Install coreutils (Linux) or ensure /usr/bin/shasum (macOS) is on PATH.${NC}"
+        exit 1
+    fi
+}
+
+# Compute the sha256 of a file using whichever tool is available.
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+# Verify a single file against an "<expected_hash>  <ignored_filename>"
+# manifest line. Aborts the installer on mismatch.
+assert_sha256() {
+    local file="$1" expected="$2" label="$3"
+    if [[ -z "$expected" ]]; then
+        error "Integrity check failed: no checksum recorded for $label."
+        error "The release at v${DECEPTICON_VERSION} predates checksum verification."
+        error "Either install a newer release (>=1.0.27) or set"
+        error "  DECEPTICON_SKIP_VERIFY=1   to explicitly opt out (NOT recommended)."
+        [[ "${DECEPTICON_SKIP_VERIFY:-}" == "1" ]] || exit 1
+        warn "  → skipping verification because DECEPTICON_SKIP_VERIFY=1."
+        return
+    fi
+    local actual
+    actual=$(sha256_of "$file")
+    if [[ "$actual" != "$expected" ]]; then
+        error "Checksum mismatch for $label — possible tampering or partial download."
+        error "  expected: $expected"
+        error "  got:      $actual"
         exit 1
     fi
 }
 
 # ── Version resolution ───────────────────────────────────────────
+# Resolve the newest FINAL release that has baked >= STABLE_SOAK_DAYS.
+# Needs python3 for the published_at date filter; prints nothing (caller
+# falls back to /releases/latest) when python3 is absent or none qualify.
+resolve_stable_soaked() {
+    command -v python3 >/dev/null 2>&1 || return 0
+    curl -s "https://api.github.com/repos/$REPO/releases?per_page=30" | python3 - "$STABLE_SOAK_DAYS" <<'PY' 2>/dev/null
+import sys, json, datetime
+try:
+    soak = float(sys.argv[1])
+except (IndexError, ValueError):
+    soak = 7.0
+now = datetime.datetime.now(datetime.timezone.utc)
+try:
+    rels = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+def key(tag):
+    base = tag.split("-", 1)[0].split(".")
+    out = []
+    for i in range(3):
+        out.append(int(base[i]) if i < len(base) and base[i].isdigit() else 0)
+    return tuple(out)
+best = None
+for r in rels if isinstance(rels, list) else []:
+    if r.get("draft") or r.get("prerelease"):
+        continue
+    tag = (r.get("tag_name") or "").lstrip("v")
+    pub = r.get("published_at")
+    if not tag or not pub:
+        continue
+    try:
+        p = datetime.datetime.fromisoformat(pub.replace("Z", "+00:00"))
+    except Exception:
+        continue
+    if (now - p).total_seconds() < soak * 86400:
+        continue  # not yet soaked
+    if best is None or key(tag) > key(best):
+        best = tag
+print(best or "")
+PY
+}
+
 resolve_version() {
     if [[ -n "${VERSION:-}" ]]; then
         DECEPTICON_VERSION="$VERSION"
         return
     fi
 
-    info "Fetching latest version..."
-    local latest
-    latest=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" \
-        | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+    local resolved=""
+    if [[ "$CHANNEL" == "stable" ]]; then
+        # stable: newest FINAL release baked >= STABLE_SOAK_DAYS.
+        info "Fetching stable version (soaked >= ${STABLE_SOAK_DAYS}d)..."
+        resolved=$(resolve_stable_soaked)
+    fi
+    if [[ -z "$resolved" ]]; then
+        # latest channel, OR stable with nothing soaked / no python3 —
+        # fall back to GitHub "latest" (newest final, excludes pre-releases).
+        [[ "$CHANNEL" == "latest" ]] && info "Fetching latest version (newest final)..."
+        resolved=$(curl -s "https://api.github.com/repos/$REPO/releases/latest" \
+            | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+    fi
 
-    if [[ -z "$latest" ]]; then
-        # No releases yet — use branch
-        DECEPTICON_VERSION="latest"
-        info "No releases found, using latest from $BRANCH branch."
+    if [[ -z "$resolved" ]]; then
+        # No releases at all — fall back to the moving channel image tag.
+        DECEPTICON_VERSION="$CHANNEL"
+        info "No releases found, using the :$CHANNEL image tag."
     else
-        DECEPTICON_VERSION="$latest"
+        DECEPTICON_VERSION="$resolved"
         # Pin config downloads to the release tag (not the moving main branch)
         RAW_BASE="https://raw.githubusercontent.com/$REPO/v$DECEPTICON_VERSION"
     fi
@@ -106,9 +241,18 @@ download_files() {
         if ! grep -q "^DECEPTICON_HOME=" "$install_dir/.env" 2>/dev/null; then
             echo "DECEPTICON_HOME=$install_dir" >> "$install_dir/.env"
         fi
+        # Record the update channel so future `decepticon update` runs and
+        # the launch-time self-update track the same stream. An existing
+        # value is preserved (the user's prior choice wins).
+        if ! grep -q "^DECEPTICON_CHANNEL=" "$install_dir/.env" 2>/dev/null; then
+            echo "DECEPTICON_CHANNEL=$CHANNEL" >> "$install_dir/.env"
+        fi
         info ".env already exists, preserving your configuration."
     else
         info "No .env yet — run 'decepticon onboard' to create one."
+        if [[ "$CHANNEL" == "latest" ]]; then
+            info "After onboarding, set DECEPTICON_CHANNEL=latest in .env to keep tracking the latest channel."
+        fi
     fi
 
     # LiteLLM config
@@ -118,8 +262,58 @@ download_files() {
     # Workspace directory (bind-mounted into containers)
     mkdir -p "$install_dir/workspace"
 
+    # Verify the three files we just wrote against the release-pinned
+    # config-checksums.txt manifest before announcing success. raw.* is
+    # served from GitHub's CDN; GitHub Releases assets carry the manifest
+    # for the same tag. Cross-checking closes the "tampered raw download"
+    # vector that previously let an attacker swap docker-compose.yml.
+    verify_config_manifest "$install_dir"
+
     # Version marker
     echo "$DECEPTICON_VERSION" > "$install_dir/.version"
+}
+
+# Download config-checksums.txt for the resolved release tag, then verify
+# every config file we wrote in download_files. The manifest is in
+# sha256sum format ("<hex>  <relative-path>"), produced by the launcher
+# release job (.github/workflows/release.yml).
+verify_config_manifest() {
+    local install_dir="$1"
+    if [[ "$DECEPTICON_VERSION" == "latest" || "$DECEPTICON_VERSION" == "stable" ]]; then
+        # resolve_version's fallback path. No release tag → no manifest.
+        # We already abort the launcher download in that branch, so this
+        # path is only hit when someone runs the installer with branch-
+        # tracking on a fresh repo; verification stays opt-out.
+        warn "No release tag resolved — skipping config manifest verification."
+        return
+    fi
+    local manifest_url="$RELEASE_BASE/v${DECEPTICON_VERSION}/config-checksums.txt"
+    local manifest="$install_dir/.config-checksums.txt"
+    if ! curl -fsSL "$manifest_url" -o "$manifest" 2>/dev/null; then
+        error "Failed to download config-checksums.txt from release v${DECEPTICON_VERSION}."
+        error "  url: $manifest_url"
+        error "Release predates checksum verification (<1.0.27) — refusing to install."
+        error "Either install a newer release, or opt out with DECEPTICON_SKIP_VERIFY=1."
+        [[ "${DECEPTICON_SKIP_VERIFY:-}" == "1" ]] || exit 1
+        warn "Skipping config manifest verification (DECEPTICON_SKIP_VERIFY=1)."
+        return
+    fi
+    info "Verifying configuration files against release manifest..."
+    while IFS=' ' read -r expected _ path; do
+        [[ -z "$expected" || -z "$path" ]] && continue
+        # path is whatever the release job recorded (e.g. "docker-compose.yml",
+        # "config/litellm.yaml", ".env.example"). Resolve relative to install_dir.
+        local target="$install_dir/$path"
+        if [[ ! -f "$target" ]]; then
+            # .env.example may be absent if download_files skipped it; for now
+            # we always write it. Surface missing files as a hard error so a
+            # silent skip doesn't mask a download failure.
+            error "Manifest lists $path but the file is missing under $install_dir."
+            exit 1
+        fi
+        assert_sha256 "$target" "$expected" "$path"
+    done < "$manifest"
+    rm -f "$manifest"
 }
 
 # ── Download launcher binary ─────────────────────────────────────
@@ -144,7 +338,7 @@ create_launcher() {
 
     local binary_name="decepticon-${os}-${arch}"
 
-    if [[ "$DECEPTICON_VERSION" == "latest" ]]; then
+    if [[ "$DECEPTICON_VERSION" == "latest" || "$DECEPTICON_VERSION" == "stable" ]]; then
         error "Could not resolve a release version automatically."
         error "Set VERSION explicitly with a tag from:"
         error "  https://github.com/$REPO/releases"
@@ -152,7 +346,7 @@ create_launcher() {
         exit 1
     fi
 
-    local download_url="https://github.com/$REPO/releases/download/v${DECEPTICON_VERSION}/${binary_name}"
+    local download_url="$RELEASE_BASE/v${DECEPTICON_VERSION}/${binary_name}"
     info "Downloading launcher binary ($binary_name)..."
     if ! curl -fsSL "$download_url" -o "$bin_dir/decepticon" 2>/dev/null; then
         error "No launcher binary for ${os}/${arch} in v${DECEPTICON_VERSION}."
@@ -161,7 +355,35 @@ create_launcher() {
         exit 1
     fi
 
+    # Verify the downloaded binary against the GoReleaser checksums.txt
+    # asset for the same tag. The OSS launcher executes as the user's
+    # session entry point — pinning its integrity is the highest-value
+    # check in the installer.
+    verify_launcher_binary "$bin_dir/decepticon" "$binary_name"
+
     chmod 755 "$bin_dir/decepticon"
+}
+
+# Download the GoReleaser-produced checksums.txt, extract the line for
+# our binary, and compare. Aborts on mismatch.
+verify_launcher_binary() {
+    local binary_path="$1" binary_name="$2"
+    local checksums_url="$RELEASE_BASE/v${DECEPTICON_VERSION}/checksums.txt"
+    local tmp
+    tmp=$(mktemp)
+    if ! curl -fsSL "$checksums_url" -o "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        error "Failed to download checksums.txt from release v${DECEPTICON_VERSION}."
+        error "Release predates checksum verification (<1.0.27) — refusing to install."
+        error "Either install a newer release, or opt out with DECEPTICON_SKIP_VERIFY=1."
+        [[ "${DECEPTICON_SKIP_VERIFY:-}" == "1" ]] || exit 1
+        warn "Skipping launcher binary verification (DECEPTICON_SKIP_VERIFY=1)."
+        return
+    fi
+    local expected
+    expected=$(awk -v name="$binary_name" '$2 == name {print $1; exit}' "$tmp")
+    rm -f "$tmp"
+    assert_sha256 "$binary_path" "$expected" "$binary_name"
 }
 
 # ── Detect stale `decepticon` in PATH ─────────────────────────────

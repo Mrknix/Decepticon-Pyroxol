@@ -29,13 +29,12 @@ import { CoordinatorPanel } from "../components/agents/CoordinatorPanel.js";
 import { ScreenProvider } from "../components/shell/ScreenContext.js";
 import { ExpandOutputProvider } from "../components/shell/ExpandOutputContext.js";
 import { SubAgentProvider } from "../components/shell/SubAgentContext.js";
-import { CtrlOToExpand } from "../components/shell/CtrlOToExpand.js";
 import { parseSlashCommand, findCommand } from "../commands/registry.js";
 import { groupConsecutiveTools } from "../utils/groupEvents.js";
 import { formatDuration } from "../utils/format.js";
 import { GLYPH_DOT, GLYPH_HOOK, GLYPH_SEP, AGENT_COLORS } from "../utils/theme.js";
 import { ToolGroupSummary } from "../components/messages/ToolGroupSummary.js";
-import type { CommandContext } from "../commands/types.js";
+import type { CommandContext, CommandResult } from "../commands/types.js";
 import type { AgentEvent, ScreenMode, SubAgentSession } from "../types.js";
 import { ErrorMessage } from "../components/messages/ErrorMessage.js";
 import { SessionPicker } from "../components/SessionPicker.js";
@@ -61,12 +60,13 @@ export function REPL({ initialMessage, resumeThread }: REPLProps) {
   // Increment to force <Static> re-mount on session switch (resets its internal render history)
   const [sessionKey, setSessionKey] = useState(0);
 
-  // Auto-submit initial message (e.g. demo mode)
+  // Auto-submit initial message when DECEPTICON_INITIAL_MESSAGE env is set
   const autoStarted = useRef(false);
   useEffect(() => {
     if (!initialMessage || autoStarted.current) return;
     autoStarted.current = true;
-    const timer = setTimeout(() => agent.submit(initialMessage), 3000);
+    const timer = setTimeout(() => agent.submit(initialMessage), 200);
+
     return () => clearTimeout(timer);
   }, []);
 
@@ -76,8 +76,10 @@ export function REPL({ initialMessage, resumeThread }: REPLProps) {
     onCancel: agent.cancel,
     onExit: exit,
     onClearQueue: agent.clearQueuedMessage,
+    addSystemEvent: agent.addSystemEvent,
     runState: agent.runState,
     hasQueuedMessage: agent.queuedMessage != null,
+    modalActive: showSessionPicker || agent.activeQuestion != null,
   });
 
   // ── Command handling ────────────────────────────────────────────
@@ -124,7 +126,11 @@ export function REPL({ initialMessage, resumeThread }: REPLProps) {
         const cmd = findCommand(parsed.name);
         if (cmd) {
           const result = cmd.execute(parsed.args, commandContext);
-          if (result?.shouldSubmit) {
+          if (result && typeof (result as Promise<unknown>).then === "function") {
+            (result as Promise<CommandResult | void>).then((r) => {
+              if (r?.shouldSubmit) agent.submit(parsed.args);
+            });
+          } else if ((result as CommandResult | void)?.shouldSubmit) {
             agent.submit(parsed.args);
           }
           return;
@@ -269,10 +275,12 @@ export function REPL({ initialMessage, resumeThread }: REPLProps) {
 
           {agent.error && <ErrorMessage content={agent.error} />}
 
-          {/* Transcript mode hint */}
-          {agent.runState === "idle" && agent.events.length > 0 && (
-            <CtrlOToExpand />
-          )}
+          {/* No global "(ctrl+o to expand)" hint here: the Prompt footer
+              already shows "ctrl+o: expand" persistently while idle, and
+              truncated/collapsed items (BashResult, ToolGroupSummary, …)
+              render their own hint inline. A blanket hint below the Static
+              region duplicated whichever hint the last item already showed,
+              producing two identical "(ctrl+o to expand)" lines. */}
 
           {showSessionPicker ? (
             <SessionPicker

@@ -1,5 +1,6 @@
 import { requireAuth, AuthError } from "@/lib/auth-bridge";
 import { prisma } from "@/lib/prisma";
+import { resolveEngagementDir } from "@/lib/workspace";
 import { NextRequest, NextResponse } from "next/server";
 import * as fs from "fs/promises";
 import * as path from "path";
@@ -12,6 +13,11 @@ interface Finding {
   evidence: string;
   attackVector: string;
   affectedAssets: string[];
+  cvssScore?: number;
+  cvssVector?: string;
+  cwe?: string[];
+  mitre?: string[];
+  remediation?: string;
 }
 
 function parseFindingMarkdown(content: string, filename: string): Finding {
@@ -22,6 +28,11 @@ function parseFindingMarkdown(content: string, filename: string): Finding {
   let evidence = "";
   let attackVector = "";
   const affectedAssets: string[] = [];
+  let cvssScore: number | undefined;
+  let cvssVector: string | undefined;
+  const cwe: string[] = [];
+  const mitre: string[] = [];
+  let remediation = "";
 
   let currentSection = "";
 
@@ -44,6 +55,13 @@ function parseFindingMarkdown(content: string, filename: string): Finding {
       if (["critical", "high", "medium", "low", "informational"].includes(val)) {
         severity = val;
       }
+    }
+    if (trimmed.toLowerCase().startsWith("cvss score") && trimmed.includes(":")) {
+      const val = trimmed.split(":")[1]?.trim();
+      if (val) cvssScore = parseFloat(val) || undefined;
+    }
+    if (trimmed.toLowerCase().startsWith("cvss vector") && trimmed.includes(":")) {
+      cvssVector = trimmed.split(":").slice(1).join(":").trim() || undefined;
     }
 
     if (currentSection === "description" && trimmed) {
@@ -69,6 +87,17 @@ function parseFindingMarkdown(content: string, filename: string): Finding {
         affectedAssets.push(trimmed.replace(/^[-*]\s*/, ""));
       }
     }
+    if (currentSection === "remediation" && trimmed) {
+      remediation += (remediation ? "\n" : "") + trimmed;
+    }
+    if ((currentSection === "cwe" || currentSection === "weaknesses") && trimmed) {
+      const cweMatch = trimmed.match(/CWE-\d+/g);
+      if (cweMatch) cwe.push(...cweMatch);
+    }
+    if ((currentSection === "mitre" || currentSection === "mitre att&ck" || currentSection === "techniques") && trimmed) {
+      const mitreMatch = trimmed.match(/T\d{4}(\.\d+)?/g);
+      if (mitreMatch) mitre.push(...mitreMatch);
+    }
   }
 
   return {
@@ -79,6 +108,11 @@ function parseFindingMarkdown(content: string, filename: string): Finding {
     evidence: evidence || "No evidence recorded.",
     attackVector: attackVector || "Unknown",
     affectedAssets,
+    ...(cvssScore != null && { cvssScore }),
+    ...(cvssVector && { cvssVector }),
+    ...(cwe.length > 0 && { cwe }),
+    ...(mitre.length > 0 && { mitre }),
+    ...(remediation && { remediation }),
   };
 }
 
@@ -107,9 +141,9 @@ export async function GET(
 
   {
     const WORKSPACE = process.env.WORKSPACE_PATH ?? path.join(process.env.HOME ?? "", ".decepticon", "workspace");
-    const wsPath = path.join(WORKSPACE, engagement.name);
-    const findingsDir = path.join(wsPath, "findings");
     try {
+      const wsPath = resolveEngagementDir(engagement.name, WORKSPACE);
+      const findingsDir = path.join(wsPath, "findings");
       const files = await fs.readdir(findingsDir);
       for (const file of files.sort()) {
         if (file.startsWith("FIND-") && file.endsWith(".md")) {

@@ -1,5 +1,6 @@
 import { requireAuth, AuthError } from "@/lib/auth-bridge";
 import { prisma } from "@/lib/prisma";
+import { SLUG_RE, VALID_TARGET_TYPES, VALID_STATUSES } from "@/lib/workspace";
 import { NextRequest, NextResponse } from "next/server";
 
 export async function GET(
@@ -23,7 +24,11 @@ export async function GET(
     if (e instanceof AuthError) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
-    throw e;
+    console.error("GET /api/engagements/[id] error:", e);
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : "Internal server error" },
+      { status: 500 }
+    );
   }
 }
 
@@ -43,9 +48,48 @@ export async function PATCH(
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
 
+    const ALLOWED_FIELDS = ["name", "status", "targetType", "targetValue", "threadId"] as const;
+    const data: Record<string, unknown> = {};
+    for (const field of ALLOWED_FIELDS) {
+      if (field in body) data[field] = body[field];
+    }
+    if (Object.keys(data).length === 0) {
+      return NextResponse.json({ error: "No valid fields to update" }, { status: 400 });
+    }
+
+    // `name` doubles as the on-disk workspace slug. Enforce the same regex as
+    // POST so a PATCH cannot smuggle a path-traversal value past the filesystem
+    // routes that resolve path.join(WORKSPACE, name).
+    if ("name" in data && (typeof data.name !== "string" || !SLUG_RE.test(data.name))) {
+      return NextResponse.json(
+        {
+          error:
+            "Invalid engagement name — must be 3-64 chars, lowercase letters / digits / internal hyphens",
+        },
+        { status: 400 }
+      );
+    }
+
+    if ("status" in data && !VALID_STATUSES.includes(data.status as (typeof VALID_STATUSES)[number])) {
+      return NextResponse.json(
+        { error: `Invalid status. Must be one of: ${VALID_STATUSES.join(", ")}` },
+        { status: 400 }
+      );
+    }
+
+    if (
+      "targetType" in data &&
+      !VALID_TARGET_TYPES.includes(data.targetType as (typeof VALID_TARGET_TYPES)[number])
+    ) {
+      return NextResponse.json(
+        { error: `Invalid targetType. Must be one of: ${VALID_TARGET_TYPES.join(", ")}` },
+        { status: 400 }
+      );
+    }
+
     const engagement = await prisma.engagement.update({
       where: { id },
-      data: body,
+      data,
     });
 
     return NextResponse.json(engagement);
@@ -53,7 +97,11 @@ export async function PATCH(
     if (e instanceof AuthError) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
-    throw e;
+    console.error("PATCH /api/engagements/[id] error:", e);
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : "Internal server error" },
+      { status: 500 }
+    );
   }
 }
 
@@ -78,6 +126,10 @@ export async function DELETE(
     if (e instanceof AuthError) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
-    throw e;
+    console.error("DELETE /api/engagements/[id] error:", e);
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : "Internal server error" },
+      { status: 500 }
+    );
   }
 }

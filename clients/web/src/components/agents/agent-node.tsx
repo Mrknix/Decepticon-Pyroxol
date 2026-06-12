@@ -3,7 +3,7 @@
 /**
  * AgentNode — SVG node for the force-directed graph.
  *
- * - Orchestrator (Decepticon): Custom mascot image
+ * - Orchestrator (Decepticon): Custom image
  * - Sub-agents: Initial avatar circle with agent color
  * - Active state: Pulse animation on border
  * - Completed: Checkmark badge
@@ -18,10 +18,11 @@ interface AgentNodeProps {
   node: GraphNode;
   x: number;
   y: number;
+  selected?: boolean;
   onDragStart?: (node: GraphNode, e: React.MouseEvent) => void;
 }
 
-export function AgentNode({ node, x, y, onDragStart }: AgentNodeProps) {
+export function AgentNode({ node, x, y, selected, onDragStart }: AgentNodeProps) {
   const isOrchestrator = node.type === "orchestrator";
   const { runtimeState } = node;
 
@@ -63,9 +64,20 @@ export function AgentNode({ node, x, y, onDragStart }: AgentNodeProps) {
       {/* Invisible hit area for reliable drag */}
       <circle r={r + 8} fill="transparent" />
 
+      {selected && (
+        <circle
+          r={r + 5}
+          fill="none"
+          stroke={color}
+          strokeWidth={2}
+          opacity={0.9}
+          style={{ pointerEvents: "none" }}
+        />
+      )}
+
       {isOrchestrator ? (
         <>
-          {/* Orchestrator: mascot image */}
+          {/* Orchestrator: image avatar */}
           <image
             href="/agents/decepticon.png"
             x={-r}

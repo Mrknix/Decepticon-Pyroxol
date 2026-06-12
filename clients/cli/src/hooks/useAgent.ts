@@ -24,6 +24,8 @@ import {
   extractText,
   stripResultTags,
 } from "@decepticon/streaming";
+import { getModelOverride } from "../commands/modelOverride.js";
+import { getAssistantOverride } from "../commands/assistantOverride.js";
 
 interface LangChainMessage {
   type: string; // "human", "ai", "tool"
@@ -111,6 +113,8 @@ interface UseAgentReturn {
 // no CLI restart needed.
 const INITIAL_ASSISTANT_ID =
   process.env.DECEPTICON_ASSISTANT_ID || "decepticon";
+let _nextEventId = 0;
+
 
 export function useAgent({
   apiUrl = process.env.DECEPTICON_API_URL || "http://localhost:2024",
@@ -151,9 +155,11 @@ export function useAgent({
   // tool flips this to "decepticon" mid-flight; the next submit() then opens
   // a fresh thread on the new assistant.
   const assistantIdRef = useRef<string>(INITIAL_ASSISTANT_ID);
-  // Slug captured from the engagement_ready event — kept for system-level
-  // logging when the handoff fires.
-  const pendingHandoffRef = useRef<string | null>(null);
+  // Boolean handoff signal — set when soundwave emits engagement_ready; consumed
+  // in handleStreamComplete to drop the soundwave thread before the auto-submit
+  // opens a fresh decepticon thread. Carries no slug; the launcher is the single
+  // source of truth and reaches the agent via config.configurable.
+  const pendingHandoffRef = useRef<boolean>(false);
 
   // Derived for backward compatibility
   const isStreaming = runState === "streaming" || runState === "connecting";
@@ -173,11 +179,11 @@ export function useAgent({
     (partial: Omit<AgentEvent, "id" | "timestamp">) => {
       const newEvent: AgentEvent = {
         ...partial,
-        id: `${Date.now()}-${Math.random()}`,
+        id: `evt-${++_nextEventId}`,
         timestamp: Date.now(),
       };
-      eventsRef.current = [...eventsRef.current, newEvent];
-      setEvents(eventsRef.current);
+      eventsRef.current.push(newEvent);
+      setEvents([...eventsRef.current]);
     },
     [],
   );
@@ -226,6 +232,8 @@ export function useAgent({
       let cumTotal = 0;
       let cumPrompt = 0;
       let cumCompletion = 0;
+      let completionReceived = false;
+
 
       const handleCustomEvent = (data: SubagentCustomEvent) => {
         switch (data.type) {
@@ -293,20 +301,57 @@ export function useAgent({
             setPendingTool(null);
             break;
 
+          case "background_complete": {
+            // SandboxNotificationMiddleware fires this when a background
+            // bash session finishes. The middleware also injects the
+            // captured output into the agent's message stream as a
+            // <system-reminder>, so the agent doesn't need to call
+            // bash_output — this event exists purely so the CLI can
+            // render a Claude-Code-style "● Background command ..."
+            // line with the output inline, instead of leaving the
+            // operator with just a tool-call shadow.
+            const exit = data.exit_code;
+            const status: "success" | "error" =
+              exit === 0 || exit === null || exit === undefined ? "success" : "error";
+            addEvent({
+              type: "background_complete",
+              content: data.content ?? "",
+              session: data.session,
+              command: data.command,
+              exitCode: exit ?? null,
+              elapsed: data.elapsed,
+              status,
+              subagent: data.agent,
+            });
+            break;
+          }
+
           case "engagement_ready": {
             // Soundwave finished writing the planning bundle. Flip the
             // active assistant so the next submit() lands on decepticon.
             // The current run continues to completion (soundwave's closing
             // message); thread handoff fires from handleStreamComplete.
-            const slug = data.engagement ?? "";
-            pendingHandoffRef.current = slug || "(unnamed)";
+            // Pure boolean signal — the engagement slug travels independently
+            // via config.configurable from the launcher's env.
+            //
+            // When the operator has explicitly picked another orchestrator
+            // via /agent (e.g. "vulnresearch"), skip this auto-handoff —
+            // their explicit choice beats the soundwave→decepticon default.
+            if (getAssistantOverride()) {
+              addEvent({
+                type: "system",
+                content:
+                  "Engagement planning complete — keeping operator-chosen orchestrator (use /agent to switch).",
+              });
+              break;
+            }
+            pendingHandoffRef.current = true;
             assistantIdRef.current = "decepticon";
             setAssistantId("decepticon");
             addEvent({
               type: "system",
-              content: slug
-                ? `Engagement '${slug}' planning complete — Decepticon will pick up your next message.`
-                : "Engagement planning complete — Decepticon will pick up your next message.",
+              content:
+                "Engagement planning complete — Decepticon will pick up your next message.",
             });
             break;
           }
@@ -463,7 +508,9 @@ export function useAgent({
               }
             } else {
               setPendingTool(null);
+              completionReceived = true;
             }
+
           } else if (msg.type === "tool") {
             const content =
               typeof msg.content === "string"
@@ -500,8 +547,26 @@ export function useAgent({
           }
         }
       }
+
+      // Detect unexpected disconnection: stream ended but no completion event.
+      //
+      // ``ask_user_question`` ends the stream by raising LangGraph's
+      // ``interrupt()`` \u2014 the run is PAUSED, not lost. ``activeQuestionRef``
+      // is the same signal ``handleStreamComplete`` already uses to keep
+      // runState=paused and render the picker. Without this guard every
+      // interview turn surfaced a bogus "Connection to server lost" notice
+      // even though the run was sitting in a clean interrupt waiting for the
+      // operator's pick.
+      const interrupted = activeQuestionRef.current !== null;
+      if (!completionReceived && !abortController.signal.aborted && !interrupted) {
+        addSystemEvent(
+          "\u26a0\ufe0f Connection to server lost. The run continues server-side. "
+          + "Use /resume to reconnect.",
+        );
+        setRunState("idle");
+      }
     },
-    [addEvent],
+    [addEvent, addSystemEvent, setRunState],
   );
 
   // ── Handle stream completion (shared by submit and resume) ─────
@@ -531,7 +596,7 @@ export function useAgent({
         threadIdRef.current = null;
         lastCountRef.current = 0;
         askedQuestionIds.current.clear();
-        pendingHandoffRef.current = null;
+        pendingHandoffRef.current = false;
       }
 
       // Auto-submit queued message
@@ -678,28 +743,39 @@ export function useAgent({
         setActiveAgent("decepticon");
         setStreamStats({ startTime: Date.now(), totalTokens: 0, promptTokens: 0, completionTokens: 0 });
 
-        // Engagement context flows in as regular state fields. A small
-        // middleware on the agent side picks engagement_name + workspace_path
-        // out of state and injects them into the model's system prompt —
-        // the LangGraph-idiomatic way to surface launcher-set context to the
-        // LLM without polluting user messages.
-        const slug = process.env.DECEPTICON_ENGAGEMENT;
+        // Engagement context and the /model override flow as runnable
+        // ``config.configurable`` entries. EngagementContextMiddleware
+        // hydrates state from configurable on before_agent so OPPLAN and
+        // filesystem middlewares see the values as ordinary state fields,
+        // and ModelOverrideMiddleware reads model_override straight from
+        // configurable. The launcher is the single source of truth for the
+        // engagement slug; the LLM never decides it.
         const input: Record<string, unknown> = {
           messages: [{ role: "user", content: message }],
         };
+
+        const configurable: Record<string, unknown> = {};
+        const slug = process.env.DECEPTICON_ENGAGEMENT;
         if (slug) {
-          input.engagement_name = slug;
-          // Sandbox /workspace is bound to this engagement directory, so the
-          // agent always sees its workspace at /workspace regardless of slug.
-          input.workspace_path = "/workspace";
+          configurable.engagement_name = slug;
+          configurable.workspace_path =
+            process.env.DECEPTICON_WORKSPACE_PATH ?? "/workspace";
         }
+        const modelOverride = getModelOverride();
+        if (modelOverride) {
+          configurable.model_override = modelOverride;
+        }
+
+        const hasConfigurable = Object.keys(configurable).length > 0;
+        const streamConfig = hasConfigurable ? { configurable } : undefined;
 
         try {
           const stream = client.runs.stream(
             threadIdRef.current!,
-            assistantIdRef.current,
+            getAssistantOverride() || assistantIdRef.current,
             {
               input,
+              ...(streamConfig ? { config: streamConfig } : {}),
               ...STREAM_OPTIONS,
               onDisconnect: "continue",
               signal: abortController.signal,
@@ -744,7 +820,7 @@ export function useAgent({
       addEvent({
         type: "ask_user_answer",
         content: display,
-        subagent: "soundwave",
+        subagent: assistantIdRef.current,
         sourceId: current.sourceId,
       });
       setActiveQuestion(null);
@@ -782,7 +858,7 @@ export function useAgent({
         try {
           const stream = client.runs.stream(
             threadIdRef.current!,
-            assistantIdRef.current,
+            getAssistantOverride() || assistantIdRef.current,
             {
               command: { resume: value },
               ...STREAM_OPTIONS,
@@ -844,7 +920,7 @@ export function useAgent({
           try {
             const stream = client.runs.stream(
               threadIdRef.current!,
-              assistantIdRef.current,
+              getAssistantOverride() || assistantIdRef.current,
               {
                 command: { resume: value ?? true },
                 ...STREAM_OPTIONS,

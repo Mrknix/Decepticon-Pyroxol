@@ -55,7 +55,13 @@ export function useRunObserver({ threadId }: UseRunObserverOptions): UseRunObser
 
     let active = true;
     const client = clientRef.current;
-    console.log("[useRunObserver] Starting poll for thread:", threadId);
+
+    // New thread = new session: start from an empty event log. Within a thread
+    // events accumulate across runs so the feed/graph mirror the CLI's full
+    // session history instead of resetting on every operator message.
+    eventsRef.current = [];
+    setEvents([]);
+    observingRunRef.current = null;
 
     const poll = async () => {
       if (!active) return;
@@ -73,9 +79,6 @@ export function useRunObserver({ threadId }: UseRunObserverOptions): UseRunObser
           setIsRunning(true);
           setActiveRunId(runningRun.run_id);
           observingRunRef.current = runningRun.run_id;
-          // Reset events for new run
-          eventsRef.current = [];
-          setEvents([]);
           joinRunStream(threadId, runningRun.run_id);
         } else if (!runningRun && observingRunRef.current) {
           observingRunRef.current = null;
@@ -120,7 +123,7 @@ export function useRunObserver({ threadId }: UseRunObserverOptions): UseRunObser
         if (event.event === "custom") {
           const customEvent = event.data as SubagentCustomEvent;
           if (customEvent?.type) {
-            eventsRef.current = [...eventsRef.current, customEvent];
+            eventsRef.current.push(customEvent);
             setEvents([...eventsRef.current]);
           }
         } else if (event.event === "values") {
@@ -135,11 +138,14 @@ export function useRunObserver({ threadId }: UseRunObserverOptions): UseRunObser
             const lastMsg = data.messages[data.messages.length - 1];
 
             if (lastMsg?.type === "ai" && lastMsg.tool_calls?.length) {
-              for (const tc of lastMsg.tool_calls) {
+              for (let i = 0; i < lastMsg.tool_calls.length; i++) {
+                const tc = lastMsg.tool_calls[i];
                 if (tc.name === "task") continue; // Sub-agent delegation — handled by custom events
-                // Orchestrator's own tool call
-                if (!seenToolCalls.has(`decepticon-${tc.name}-${data.messages.length}`)) {
-                  seenToolCalls.add(`decepticon-${tc.name}-${data.messages.length}`);
+                // Key by position too, so parallel calls to the same tool in one
+                // message are not collapsed into a single event.
+                const key = `decepticon-${tc.name}-${i}-${data.messages.length}`;
+                if (!seenToolCalls.has(key)) {
+                  seenToolCalls.add(key);
                   newEvents.push({
                     type: "subagent_tool_call",
                     agent: "decepticon",
@@ -163,7 +169,7 @@ export function useRunObserver({ threadId }: UseRunObserverOptions): UseRunObser
             }
 
             if (newEvents.length > 0) {
-              eventsRef.current = [...eventsRef.current, ...newEvents];
+              eventsRef.current.push(...newEvents);
               setEvents([...eventsRef.current]);
             }
           }

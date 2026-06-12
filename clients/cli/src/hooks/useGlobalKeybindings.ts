@@ -26,10 +26,13 @@ interface Props {
   onExit: () => void;
   /** Called to clear a queued message. */
   onClearQueue?: () => void;
+  /** Emit a system-level event visible in the chat log. */
+  addSystemEvent?: (message: string) => void;
   /** Current run lifecycle state. */
   runState: RunState;
   /** Whether a message is queued. */
   hasQueuedMessage?: boolean;
+  modalActive?: boolean;
 }
 
 const DOUBLE_PRESS_MS = 500;
@@ -39,8 +42,10 @@ export function useGlobalKeybindings({
   onCancel,
   onExit,
   onClearQueue,
+  addSystemEvent,
   runState,
   hasQueuedMessage = false,
+  modalActive = false,
 }: Props): void {
   const screen = useAppState((s) => s.screen);
   const setAppState = useSetAppState();
@@ -90,6 +95,7 @@ export function useGlobalKeybindings({
         } else {
           // Single Ctrl+C while streaming → pause (state preserved)
           onInterrupt();
+          addSystemEvent?.("Press Ctrl+C again within 500ms to cancel the run.");
         }
         // Also exit transcript if viewing it
         if (screen === "transcript") {
@@ -109,6 +115,8 @@ export function useGlobalKeybindings({
           onClearQueue?.();
         } else if (screen === "transcript") {
           exitTranscript();
+        } else if (modalActive) {
+          return;
         } else {
           // Truly idle, no queue → exit app
           onExit();
